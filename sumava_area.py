@@ -1,105 +1,337 @@
 """
-Šumava National Park Data Downloader - FIXED APPROACH
-Uses alternative methods to get ONLY Šumava data
+Šumava National Park Downloader - OpenStreetMap Method
+This is the most reliable method for getting protected area boundaries
 """
 
 import requests
-import json
 import geopandas as gpd
 from pathlib import Path
+import json
 import time
 
-class SumavaDownloader:
-    """Download Šumava NP data using multiple alternative approaches"""
+class SumavaOSMDownloader:
+    """Download Šumava NP data from OpenStreetMap using Overpass API"""
     
     def __init__(self, output_dir="sumava_data"):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         
-        # AOPK Open Data Portal
-        self.aopk_opendata = "https://gis-aopkcr.opendata.arcgis.com"
-        
-        # AOPK REST Services
-        self.aopk_base = "https://gis.nature.cz/arcgis/rest/services"
-        
-    def download_and_filter_arcgis(self, service_url, where_clause, name, filter_keyword='šumava'):
+        # Overpass API endpoint
+        self.overpass_url = "https://overpass-api.de/api/interpreter"
+    
+    def download_from_osm(self):
         """
-        Download from ArcGIS and filter locally for Šumava only
-        This solves the problem of ArcGIS queries returning all areas
+        Download Šumava National Park from OpenStreetMap
+        OSM has very accurate protected area boundaries
         """
-        params = {
-            'where': where_clause,
-            'outFields': '*',
-            'f': 'geojson',
-            'returnGeometry': 'true',
-            'outSR': '4326'
-        }
+        print("\n" + "="*70)
+        print("DOWNLOADING FROM OPENSTREETMAP")
+        print("="*70)
+        print("Using Overpass API to query for Šumava National Park...")
         
-        query_url = f"{service_url}/query"
+        # Overpass QL query for Šumava National Park
+        # This searches for boundaries with specific tags
+        overpass_query = """
+        [out:json][timeout:60];
+        (
+          // Search for Šumava National Park relation
+          relation["boundary"="protected_area"]["protect_class"="2"]["name:cs"~"Šumava",i];
+          relation["boundary"="national_park"]["name:cs"~"Šumava",i];
+          relation["boundary"="protected_area"]["name"~"Šumava",i];
+          relation["leisure"="nature_reserve"]["name"~"Šumava",i];
+          // Also search by wikidata ID (most reliable)
+          relation["wikidata"="Q213460"];
+        );
+        out geom;
+        """
         
-        print(f"\n📥 Downloading from: {name}")
-        print(f"   URL: {query_url}")
+        print("\n📥 Querying Overpass API...")
+        print("   This may take 10-30 seconds...")
         
         try:
-            response = requests.get(query_url, params=params, timeout=120)
+            response = requests.post(
+                self.overpass_url,
+                data={'data': overpass_query},
+                timeout=90
+            )
             response.raise_for_status()
+            
             data = response.json()
             
-            if 'features' not in data or len(data['features']) == 0:
-                print(f"   ⚠️ No features found")
-                return None
+            if 'elements' not in data or len(data['elements']) == 0:
+                print("\n❌ No results from OSM")
+                return self.try_osm_nominatim()
             
-            print(f"   📊 Retrieved {len(data['features'])} features")
+            print(f"\n✅ Found {len(data['elements'])} OSM element(s)")
             
-            # Load as GeoDataFrame for filtering
-            gdf = gpd.GeoDataFrame.from_features(data['features'])
+            # Convert OSM JSON to GeoDataFrame
+            features = []
+            for element in data['elements']:
+                if element['type'] == 'relation' and 'members' in element:
+                    # Extract geometry from relation members
+                    geometry = self.osm_relation_to_geometry(element)
+                    if geometry:
+                        properties = element.get('tags', {})
+                        properties['osm_id'] = element['id']
+                        properties['osm_type'] = element['type']
+                        features.append({
+                            'type': 'Feature',
+                            'geometry': geometry,
+                            'properties': properties
+                        })
             
-            # Filter for Šumava
-            print(f"   🔍 Filtering for '{filter_keyword}'...")
+            if not features:
+                print("\n⚠️ Could not extract geometries from OSM")
+                return self.try_osm_nominatim()
             
-            # Search in all text columns
-            mask = gdf.apply(
-                lambda row: any(
-                    filter_keyword.lower() in str(val).lower()
-                    for val in row.values
-                    if isinstance(val, str)
-                ),
-                axis=1
-            )
+            # Create GeoDataFrame
+            gdf = gpd.GeoDataFrame.from_features(features, crs='EPSG:4326')
             
-            gdf_filtered = gdf[mask]
+            # Show what we got
+            print(f"\n📋 Downloaded boundary:")
+            if 'name' in gdf.columns:
+                print(f"   Name: {gdf['name'].iloc[0]}")
+            if 'name:cs' in gdf.columns:
+                print(f"   Czech name: {gdf['name:cs'].iloc[0]}")
             
-            if len(gdf_filtered) == 0:
-                print(f"   ❌ No features matching '{filter_keyword}' found")
-                print(f"   Available areas:")
-                if 'nazev' in gdf.columns:
-                    for area in gdf['nazev'].unique()[:10]:
-                        print(f"      • {area}")
-                return None
+            # Calculate area
+            gdf_utm = gdf.to_crs('EPSG:32633')
+            area_km2 = gdf_utm.geometry.area.sum() / 1_000_000
+            print(f"   Area: {area_km2:.2f} km²")
+            print(f"   Expected: ~680 km²")
             
-            print(f"   ✅ Filtered to {len(gdf_filtered)} Šumava feature(s)")
-            
-            if 'nazev' in gdf_filtered.columns:
-                for area in gdf_filtered['nazev'].unique():
-                    print(f"      • {area}")
+            if 600 < area_km2 < 750:
+                print(f"   ✅ Area matches expected Šumava NP size!")
+            else:
+                print(f"   ⚠️ Area differs from expected - may need verification")
             
             # Save
-            output_path = self.output_dir / f"{name}.geojson"
-            gdf_filtered.to_file(output_path, driver='GeoJSON')
-            print(f"   💾 Saved: {output_path}")
+            self.save_all_formats(gdf, "sumava_np_osm")
             
-            # Convert to other formats
-            self.convert_formats(gdf_filtered, name)
+            return gdf
             
-            return output_path
+        except requests.exceptions.Timeout:
+            print("\n⚠️ Overpass API timeout - trying alternative method...")
+            return self.try_osm_nominatim()
+        
+        except Exception as e:
+            print(f"\n❌ OSM download error: {e}")
+            return self.try_osm_nominatim()
+    
+    def osm_relation_to_geometry(self, relation):
+        """Convert OSM relation to geometry"""
+        try:
+            from shapely.geometry import Polygon, MultiPolygon, mapping
+            from shapely.ops import unary_union
+            
+            if 'geometry' in relation:
+                # Overpass returns geometry in a specific format
+                members = relation['members']
+                
+                # Collect all ways that form the outer boundary
+                outer_ways = []
+                for member in members:
+                    if member.get('role') == 'outer' and 'geometry' in member:
+                        coords = [(node['lon'], node['lat']) for node in member['geometry']]
+                        if len(coords) >= 3:
+                            outer_ways.append(coords)
+                
+                if outer_ways:
+                    # Try to create polygon
+                    if len(outer_ways) == 1:
+                        return mapping(Polygon(outer_ways[0]))
+                    else:
+                        # Multiple outer ways - try to merge
+                        polygons = [Polygon(way) for way in outer_ways if len(way) >= 3]
+                        if polygons:
+                            merged = unary_union(polygons)
+                            return mapping(merged)
+            
+            return None
             
         except Exception as e:
-            print(f"   ❌ Error: {e}")
+            print(f"   ⚠️ Geometry conversion error: {e}")
             return None
     
-    def convert_formats(self, gdf, name):
-        """Convert to multiple formats"""
+    def try_osm_nominatim(self):
+        """
+        Alternative: Use Nominatim to get boundary
+        """
+        print("\n" + "="*70)
+        print("ALTERNATIVE: NOMINATIM GEOCODING")
+        print("="*70)
+        
+        # Nominatim search for Šumava NP
+        nominatim_url = "https://nominatim.openstreetmap.org/search"
+        
+        params = {
+            'q': 'Národní park Šumava',
+            'format': 'json',
+            'polygon_geojson': 1,
+            'limit': 5
+        }
+        
+        headers = {
+            'User-Agent': 'Sumava-Research-Project/1.0'
+        }
+        
+        print("\n📥 Querying Nominatim...")
+        
         try:
+            time.sleep(1)  # Respect Nominatim rate limits
+            response = requests.get(nominatim_url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+            
+            results = response.json()
+            
+            if not results:
+                print("\n❌ No results from Nominatim")
+                return self.download_from_geojson_io()
+            
+            print(f"\n✅ Found {len(results)} result(s)")
+            
+            # Find the best match (national park)
+            best_result = None
+            for result in results:
+                if 'geojson' in result:
+                    name = result.get('display_name', '')
+                    osm_type = result.get('osm_type', '')
+                    print(f"   • {name}")
+                    
+                    if 'national park' in name.lower() or 'národní park' in name.lower():
+                        best_result = result
+                        break
+            
+            if not best_result:
+                best_result = results[0]
+            
+            # Convert to GeoDataFrame
+            feature = {
+                'type': 'Feature',
+                'geometry': best_result['geojson'],
+                'properties': {
+                    'name': best_result.get('display_name', 'Šumava NP'),
+                    'osm_id': best_result.get('osm_id'),
+                    'osm_type': best_result.get('osm_type'),
+                    'source': 'Nominatim'
+                }
+            }
+            
+            gdf = gpd.GeoDataFrame.from_features([feature], crs='EPSG:4326')
+            
+            # Calculate area
+            gdf_utm = gdf.to_crs('EPSG:32633')
+            area_km2 = gdf_utm.geometry.area.sum() / 1_000_000
+            print(f"\n📏 Area: {area_km2:.2f} km²")
+            
+            self.save_all_formats(gdf, "sumava_np_nominatim")
+            
+            return gdf
+            
+        except Exception as e:
+            print(f"\n❌ Nominatim error: {e}")
+            return self.download_from_geojson_io()
+    
+    def download_from_geojson_io(self):
+        """
+        Use geojson.io / GitHub datasets as fallback
+        """
+        print("\n" + "="*70)
+        print("FALLBACK: GITHUB GEOJSON DATASETS")
+        print("="*70)
+        
+        # Try various GitHub sources for Czech protected areas
+        github_sources = [
+            # Natural Earth Data - protected areas
+            "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_parks_and_protected_lands.geojson",
+        ]
+        
+        for url in github_sources:
+            try:
+                print(f"\n📥 Trying: {url.split('/')[-1]}")
+                gdf = gpd.read_file(url)
+                
+                # Filter for Šumava
+                mask = gdf.apply(
+                    lambda row: any('umava' in str(val).lower() for val in row.values if isinstance(val, str)),
+                    axis=1
+                )
+                
+                gdf_sumava = gdf[mask]
+                
+                if len(gdf_sumava) > 0:
+                    print(f"   ✅ Found Šumava in dataset!")
+                    self.save_all_formats(gdf_sumava, "sumava_np_github")
+                    return gdf_sumava
+                    
+            except Exception as e:
+                print(f"   ⚠️ Failed: {e}")
+                continue
+        
+        print("\n❌ All GitHub sources failed")
+        return None
+    
+    def download_sumava_chko(self):
+        """Download CHKO Šumava from OSM"""
+        print("\n" + "="*70)
+        print("DOWNLOADING CHKO ŠUMAVA FROM OSM")
+        print("="*70)
+        
+        overpass_query = """
+        [out:json][timeout:60];
+        (
+          relation["boundary"="protected_area"]["protect_class"="5"]["name:cs"~"Šumava",i];
+          relation["boundary"="protected_area"]["name"~"Šumava",i]["designation"~"landscape",i];
+        );
+        out geom;
+        """
+        
+        try:
+            response = requests.post(
+                self.overpass_url,
+                data={'data': overpass_query},
+                timeout=90
+            )
+            
+            data = response.json()
+            
+            if data.get('elements'):
+                print(f"\n✅ Found {len(data['elements'])} CHKO element(s)")
+                # Process similar to NP
+                features = []
+                for element in data['elements']:
+                    if element['type'] == 'relation':
+                        geometry = self.osm_relation_to_geometry(element)
+                        if geometry:
+                            properties = element.get('tags', {})
+                            properties['osm_id'] = element['id']
+                            features.append({
+                                'type': 'Feature',
+                                'geometry': geometry,
+                                'properties': properties
+                            })
+                
+                if features:
+                    gdf = gpd.GeoDataFrame.from_features(features, crs='EPSG:4326')
+                    self.save_all_formats(gdf, "sumava_chko_osm")
+                    return gdf
+            else:
+                print("\n⚠️ No CHKO found in OSM")
+                
+        except Exception as e:
+            print(f"\n⚠️ CHKO download failed: {e}")
+        
+        return None
+    
+    def save_all_formats(self, gdf, name):
+        """Save in multiple formats"""
+        try:
+            # GeoJSON
+            geojson_path = self.output_dir / f"{name}.geojson"
+            gdf.to_file(geojson_path, driver='GeoJSON')
+            print(f"\n💾 Saved formats:")
+            print(f"   📄 GeoJSON: {geojson_path}")
+            
             # Shapefile
             shp_path = self.output_dir / f"{name}.shp"
             gdf.to_file(shp_path, driver='ESRI Shapefile')
@@ -116,260 +348,66 @@ class SumavaDownloader:
             print(f"   🌍 KML: {kml_path}")
             
         except Exception as e:
-            print(f"   ⚠️ Format conversion issue: {e}")
+            print(f"   ⚠️ Format conversion error: {e}")
     
-    def method_1_filtered_download(self):
-        """
-        METHOD 1: Download all protected areas, filter locally for Šumava
-        This is the most reliable method
-        """
-        print("\n" + "="*70)
-        print("METHOD 1: DOWNLOAD + LOCAL FILTERING")
-        print("="*70)
+    def create_visualization(self):
+        """Create map preview"""
+        import matplotlib.pyplot as plt
         
-        # National Parks
-        print("\n1️⃣ National Parks...")
-        np_url = f"{self.aopk_base}/UzemniOchrana/ChranUzemi/MapServer/0"
-        self.download_and_filter_arcgis(np_url, "1=1", "sumava_np", 'šumava')
-        
-        time.sleep(1)
-        
-        # Protected Landscape Areas (CHKO)
-        print("\n2️⃣ Protected Landscape Areas (CHKO)...")
-        chko_url = f"{self.aopk_base}/UzemniOchrana/ChranUzemi/MapServer/1"
-        self.download_and_filter_arcgis(chko_url, "1=1", "sumava_chko", 'šumava')
-    
-    def method_2_bbox_download(self):
-        """
-        METHOD 2: Use bounding box to limit download area
-        Šumava bounding box (approximate): 48.6-49.2°N, 13.3-14.0°E
-        """
-        print("\n" + "="*70)
-        print("METHOD 2: BOUNDING BOX FILTERING")
-        print("="*70)
-        
-        # Šumava approximate bounding box
-        bbox = "13.3,48.6,14.0,49.2"  # xmin,ymin,xmax,ymax
-        
-        print(f"\n📍 Using bbox: {bbox}")
-        
-        np_url = f"{self.aopk_base}/UzemniOchrana/ChranUzemi/MapServer/0"
-        
-        params = {
-            'geometry': bbox,
-            'geometryType': 'esriGeometryEnvelope',
-            'spatialRel': 'esriSpatialRelIntersects',
-            'outFields': '*',
-            'f': 'geojson',
-            'returnGeometry': 'true',
-            'outSR': '4326'
-        }
-        
-        try:
-            response = requests.get(f"{np_url}/query", params=params, timeout=120)
-            response.raise_for_status()
-            data = response.json()
-            
-            if 'features' in data and len(data['features']) > 0:
-                gdf = gpd.GeoDataFrame.from_features(data['features'])
-                
-                # Still filter for Šumava in case bbox caught nearby areas
-                mask = gdf.apply(
-                    lambda row: 'šumava' in str(row).lower() or 'sumava' in str(row).lower(),
-                    axis=1
-                )
-                gdf = gdf[mask]
-                
-                if len(gdf) > 0:
-                    output_path = self.output_dir / "sumava_bbox_method.geojson"
-                    gdf.to_file(output_path, driver='GeoJSON')
-                    print(f"   ✅ Saved {len(gdf)} feature(s): {output_path}")
-                    self.convert_formats(gdf, "sumava_bbox_method")
-                else:
-                    print("   ⚠️ No Šumava features in bbox")
-            
-        except Exception as e:
-            print(f"   ❌ Error: {e}")
-    
-    def method_3_manual_coordinates(self):
-        """
-        METHOD 3: Create boundary from known coordinates
-        Use this if download fails - creates approximate boundary
-        """
-        print("\n" + "="*70)
-        print("METHOD 3: MANUAL BOUNDARY FROM COORDINATES")
-        print("="*70)
-        
-        from shapely.geometry import Polygon
-        
-        # Approximate Šumava NP boundary (simplified)
-        coords = [
-            [13.32, 48.93],
-            [13.85, 48.93],
-            [13.85, 49.15],
-            [13.32, 49.15],
-            [13.32, 48.93]
-        ]
-        
-        polygon = Polygon(coords)
-        gdf = gpd.GeoDataFrame(
-            {'name': ['Šumava NP (Approximate)'], 'source': ['Manual']},
-            geometry=[polygon],
-            crs='EPSG:4326'
-        )
-        
-        output_path = self.output_dir / "sumava_manual_boundary.geojson"
-        gdf.to_file(output_path, driver='GeoJSON')
-        print(f"   ✅ Created approximate boundary: {output_path}")
-        print(f"   ⚠️ This is a simplified rectangle - not official boundary!")
-        self.convert_formats(gdf, "sumava_manual_boundary")
-    
-    def method_4_natura2000(self):
-        """
-        METHOD 4: Try Natura 2000 sites (EU protected areas)
-        Šumava is also a Natura 2000 site
-        """
-        print("\n" + "="*70)
-        print("METHOD 4: NATURA 2000 SITES")
-        print("="*70)
-        
-        # Try AOPK Natura 2000 service
-        natura_url = f"{self.aopk_base}/UzemniOchrana/Natura2000/MapServer"
-        
-        print("\n🔍 Exploring Natura 2000 layers...")
-        
-        try:
-            response = requests.get(f"{natura_url}?f=json", timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            
-            if 'layers' in data:
-                print(f"   Found {len(data['layers'])} layers")
-                
-                for layer in data['layers']:
-                    layer_id = layer['id']
-                    layer_name = layer['name']
-                    
-                    if 'šumava' in layer_name.lower() or layer_id in [0, 1, 2]:
-                        print(f"\n   📥 Trying layer {layer_id}: {layer_name}")
-                        self.download_and_filter_arcgis(
-                            f"{natura_url}/{layer_id}",
-                            "1=1",
-                            f"sumava_natura_{layer_id}",
-                            'šumava'
-                        )
-                        time.sleep(1)
-        
-        except Exception as e:
-            print(f"   ⚠️ Natura 2000 service error: {e}")
-    
-    def create_combined(self):
-        """Combine all successfully downloaded Šumava files"""
-        print("\n" + "="*70)
-        print("CREATING COMBINED ŠUMAVA DATASET")
-        print("="*70)
-        
-        geojson_files = list(self.output_dir.glob("*.geojson"))
+        geojson_files = [f for f in self.output_dir.glob("*.geojson") 
+                        if 'approximate' not in f.name]
         
         if not geojson_files:
-            print("   ⚠️ No GeoJSON files found to combine")
             return
         
-        gdfs = []
+        fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+        
         for file in geojson_files:
-            if 'combined' not in file.name:
-                try:
-                    gdf = gpd.read_file(file)
-                    if not gdf.empty:
-                        gdf['source_file'] = file.stem
-                        gdfs.append(gdf)
-                except:
-                    pass
+            gdf = gpd.read_file(file)
+            gdf.plot(ax=ax, alpha=0.5, edgecolor='red', linewidth=2, 
+                    label=file.stem)
         
-        if gdfs:
-            combined = gpd.pd.concat(gdfs, ignore_index=True)
-            
-            output_path = self.output_dir / "SUMAVA_COMBINED.geojson"
-            combined.to_file(output_path, driver='GeoJSON')
-            print(f"   ✅ Combined {len(gdfs)} datasets: {output_path}")
-            print(f"   📊 Total features: {len(combined)}")
-            
-            self.convert_formats(combined, "SUMAVA_COMBINED")
+        ax.set_title('Šumava National Park - OpenStreetMap Data', fontsize=16)
+        ax.set_xlabel('Longitude')
+        ax.set_ylabel('Latitude')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        map_path = self.output_dir / "sumava_osm_preview.png"
+        plt.savefig(map_path, dpi=150, bbox_inches='tight')
+        print(f"\n🗺️  Map saved: {map_path}")
+        
+        plt.show()
     
-    def run_all_methods(self):
-        """Try all methods to get Šumava data"""
+    def run(self):
+        """Main execution"""
         print("\n" + "="*70)
-        print("ŠUMAVA DATA DOWNLOADER - ALL METHODS")
+        print("ŠUMAVA DOWNLOADER - OPENSTREETMAP METHOD")
         print("="*70)
-        print("Trying multiple approaches to download ONLY Šumava data")
-        print("="*70)
-        
-        # Try each method
-        self.method_1_filtered_download()
-        time.sleep(2)
-        
-        self.method_2_bbox_download()
-        time.sleep(2)
-        
-        self.method_4_natura2000()
-        time.sleep(2)
-        
-        # Combine results
-        self.create_combined()
-        
-        # If nothing worked, create manual boundary
-        if not list(self.output_dir.glob("sumava*.geojson")):
-            print("\n⚠️ All download methods failed!")
-            print("Creating manual approximate boundary as fallback...")
-            self.method_3_manual_coordinates()
-        
-        self.print_summary()
-    
-    def print_summary(self):
-        """Print summary of downloaded files"""
-        print("\n" + "="*70)
-        print("DOWNLOAD SUMMARY")
+        print("Most reliable source for Czech protected areas")
         print("="*70)
         
-        files = list(self.output_dir.glob("*"))
+        # Download NP
+        np_gdf = self.download_from_osm()
         
-        if not files:
-            print("\n❌ No files downloaded!")
-            print("\nRECOMMENDATION:")
-            print("Contact Šumava NP directly:")
-            print("  Email: gis@npsumava.cz")
-            print("  Website: https://geoportal.npsumava.cz")
-            return
-        
-        print(f"\n📁 Output: {self.output_dir.absolute()}\n")
-        
-        for fmt in ['geojson', 'shp', 'gpkg', 'kml']:
-            files_fmt = list(self.output_dir.glob(f"*.{fmt}"))
-            if files_fmt:
-                print(f"{fmt.upper()}: {len(files_fmt)} files")
-                for f in sorted(files_fmt):
-                    size = f.stat().st_size / 1024
-                    print(f"  • {f.name} ({size:.1f} KB)")
-        
-        print("\n✅ READY FOR SENTINEL-2 ANALYSIS")
+        if np_gdf is not None:
+            # Try CHKO too
+            time.sleep(2)
+            chko_gdf = self.download_sumava_chko()
+            
+            # Create visualization
+            try:
+                self.create_visualization()
+            except:
+                print("\n⚠️ Could not create visualization")
+            
+            print("   → sumava_np_osm.geojson")
+
+
 
 
 if __name__ == "__main__":
-    downloader = SumavaDownloader(output_dir="sumava_data")
-    downloader.run_all_methods()
-    
-    print("\n" + "="*70)
-    print("NEXT STEPS")
-    print("="*70)
-    print("""
-Use the downloaded files for:
-✅ Sentinel-2 imagery clipping (AOI)
-✅ Training/validation zones
-✅ Study area boundaries
-
-Coordinates in WGS84 (EPSG:4326) - compatible with all satellite platforms.
-
-If download failed, contact Šumava NP directly:
-📧 gis@npsumava.cz
-🌐 https://geoportal.npsumava.cz
-""")
+    downloader = SumavaOSMDownloader(output_dir="sumava_data")
+    downloader.run()
