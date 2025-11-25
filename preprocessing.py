@@ -1,52 +1,109 @@
-#normalize the rectangels from sentinel2 images in order to train them? 
-import geopandas as gpd
+# ------------------------------------------------------------
+# Sentinel-2 Preprocessing – Robust Version
+# ------------------------------------------------------------
 import os
+import re
 import rasterio
 import numpy as np
 import pandas as pd
 from datetime import datetime
 import matplotlib.pyplot as plt
 
+# ------------------------------
+# 1) Settings
+# ------------------------------
 root = "data/historical"
+gfc_loss_path = "data/gfc_lossyear.tif"
 
-with rasterio.open("data/gfc_lossyear.tif") as src:
+# ------------------------------
+# 2) Load Global Forest Change (GFC) loss year layer
+# ------------------------------
+with rasterio.open(gfc_loss_path) as src:
     gfc_loss_patch = src.read(1)
 
+# ------------------------------
+# 3) Helper function: extract date robustly from filename
+# ------------------------------
+def extract_date_from_filename(fname):
+    """
+    Extracts year, month, day from a filename.
+    Works for messy names like:
+        sumava_2020-10-25.tif
+        sumava_2021_04_17(1).tif
+        regionA_sumava_2022_07_02 copy.tif
+    """
+    # Find all 4-digit years in the filename
+    years = re.findall(r"(\d{4})", fname)
+    for y in years:
+        # Look for month/day after this year
+        pattern = rf"{y}[-_]?(\d{{2}})[-_]?(\d{{2}})"
+        match = re.search(pattern, fname)
+        if match:
+            m, d = map(int, match.groups())
+            return datetime(int(y), m, d)
+    return None
+
+# ------------------------------
+# 4) Preprocess TIFFs
+# ------------------------------
 records = []
 
-for year in sorted(os.listdir(root)):
-    folder = os.path.join(root, year)
+for year_folder in sorted(os.listdir(root)):
+    folder = os.path.join(root, year_folder)
     if not os.path.isdir(folder):
         continue
-    
+
     for tif in sorted(os.listdir(folder)):
-        if not tif.endswith(".tif"):
-            continue
-        
-        date_str = tif.replace(".tif","")
-        date = datetime.strptime(date_str, "%Y-%m-%d")
         path = os.path.join(folder, tif)
 
+        # Skip non-TIFFs and hidden/macOS files
+        if not tif.lower().endswith(".tif") or tif.startswith(".") or tif.startswith("._"):
+            continue
+
+        # Skip duplicate/messy files
+        if re.search(r"\(\d+\)", tif) or "copy" in tif.lower() or " " in tif[:-4]:
+            print("Skipping duplicate/messy file:", tif)
+            continue
+
+        # Extract date
+        date = extract_date_from_filename(tif)
+        if date is None:
+            print("Skipping bad filename (no date found):", tif)
+            continue
+
+        # Read raster and normalize
         with rasterio.open(path) as src:
-            arr = src.read().astype("float32")  # shape: [3 bands, H, W]
+            arr = src.read().astype("float32")
+            arr /= 10000.0  # Sentinel-2 normalization 0-1
+
             ndvi = arr[0]
             nbr  = arr[1]
             ndmi = arr[2]
 
-            records.append({
-                "date": date,
-                "year": int(year),
-                "NDVI_mean": np.nanmean(ndvi),
-                "NBR_mean": np.nanmean(nbr),
-                "NDMI_mean": np.nanmean(ndmi),
-            })
+        records.append({
+            "date": date,
+            "year": date.year,
+            "NDVI_mean": float(np.nanmean(ndvi)),
+            "NBR_mean":  float(np.nanmean(nbr)),
+            "NDMI_mean": float(np.nanmean(ndmi)),
+        })
 
-df = pd.DataFrame(records).sort_values("date")
-df.head()
+# ------------------------------
+# 5) Build DataFrame
+# ------------------------------
+if not records:
+    raise RuntimeError("No TIFF files were processed! Check filenames and paths.")
 
+df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+print("Loaded records:", len(df))
+print(df.head())
+
+# ------------------------------
+# 6) Plot Time Series
+# ------------------------------
 plt.figure(figsize=(14,6))
 plt.plot(df["date"], df["NDVI_mean"], label="NDVI")
-plt.plot(df["date"], df["NBR_mean"],  label="NBR")
+plt.plot(df["date"], df["NBR_mean"], label="NBR")
 plt.plot(df["date"], df["NDMI_mean"], label="NDMI")
 plt.legend()
 plt.title("Vegetation Indices Time Series – Šumava")
@@ -55,55 +112,27 @@ plt.ylabel("Index value")
 plt.grid()
 plt.show()
 
+# ------------------------------
+# 7) Load individual NBR for change detection
+# ------------------------------
 def load_tif(path):
     with rasterio.open(path) as src:
-        return src.read(2).astype("float32")  # band 2 = NBR in your exports
+        return src.read(2).astype("float32")  # band 2 = NBR
 
-# choose pair
-before = "data/historical/2021/2021-06-12.tif"
-after  = "data/historical/2021/2021-07-27.tif"
+# Example usage:
+# before = "data/historical/2021/2021-06-12.tif"
+# after  = "data/historical/2021/2021-07-27.tif"
+# delta_nbr = load_tif(before) - load_tif(after)
 
-nbr_before = load_tif(before)
-nbr_after  = load_tif(after)
-
-delta_nbr = nbr_before - nbr_after  # positive = disturbance
-
-plt.figure(figsize=(8,6))
-plt.imshow(delta_nbr, cmap="RdYlGn", vmin=-1, vmax=1)
-plt.colorbar(label="ΔNBR (loss)")
-plt.title("Change Detection (ΔNBR) – Šumava")
-plt.show()
-
-
+# ------------------------------
+# 8) Label disturbances
+# ------------------------------
 def label_disturbances(df, gfc_loss_patch, nbr_drop_threshold=0.15, gfc_fraction_threshold=0.0):
-    """
-    Label forest disturbances in a Sentinel-2 time-series dataframe.
-
-    Parameters:
-    -----------
-    df : pd.DataFrame
-        Must contain 'date' (datetime) and 'NBR_mean' (mean NBR for patch).
-    gfc_loss_patch : np.array or pd.Series
-        Array of Hansen GFC loss years for the patch (same spatial extent as patch).
-        Values: 0=no loss, 1..21 = loss year (2001-2021).
-    nbr_drop_threshold : float
-        Threshold for sudden NBR drop to flag disturbance.
-    gfc_fraction_threshold : float
-        Minimum fraction of pixels lost in patch to consider label=1.
-
-    Returns:
-    --------
-    df_labeled : pd.DataFrame
-        Original dataframe with two new columns:
-        - 'disturbed': True if sudden NBR drop
-        - 'gfc_label': 0=healthy, 1=loss according to GFC
-    """
-
     df = df.copy()
     df["disturbed"] = False
     df["gfc_label"] = 0
 
-    #Spectral change detection
+    # Sudden NBR drops
     for i in range(1, len(df)):
         prev_nbr = df.iloc[i-1]["NBR_mean"]
         curr_nbr = df.iloc[i]["NBR_mean"]
@@ -112,15 +141,13 @@ def label_disturbances(df, gfc_loss_patch, nbr_drop_threshold=0.15, gfc_fraction
         if prev_nbr - curr_nbr > nbr_drop_threshold:
             df.loc[df.index[i], "disturbed"] = True
 
-    # Hansen GFC labeling
+    # GFC labels
     for i, row in df.iterrows():
         year = row["date"].year
-        gfc_code = year - 2000  # Map calendar year to GFC lossyear (1=2001)
+        gfc_code = year - 2000
         if 1 <= gfc_code <= 21:
-            # Fraction of pixels in patch lost this year
             fraction_lost = np.nanmean(gfc_loss_patch == gfc_code)
             if fraction_lost > gfc_fraction_threshold:
                 df.loc[i, "gfc_label"] = 1
 
     return df
-
