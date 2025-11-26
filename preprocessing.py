@@ -49,8 +49,8 @@ def extract_date_from_filename(fname):
 records = []
 
 for year_folder in sorted(os.listdir(root)):
-    folder = os.path.join(root, year_folder)
-    if not os.path.isdir(folder):
+    folder = os.path.join(root)
+    if not os.path.isdir(path):
         continue
 
     for tif in sorted(os.listdir(folder)):
