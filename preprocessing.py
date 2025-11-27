@@ -151,3 +151,5 @@ def label_disturbances(df, gfc_loss_patch, nbr_drop_threshold=0.15, gfc_fraction
                 df.loc[i, "gfc_label"] = 1
 
     return df
+
+print(df)
