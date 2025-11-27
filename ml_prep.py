@@ -1,6 +1,5 @@
-# ============================================================================
-# ML PREPARATION WORKFLOW - Deforestation Detection in Šumava
-# ============================================================================
+#cleaning data - labeling ...
+
 import os
 import numpy as np
 import pandas as pd
@@ -10,8 +9,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import seaborn as sns
 
-# ============================================================================
-# STEP 1: IMPROVED LABELING STRATEGY
+# LABELING
 # ============================================================================
 
 def create_training_labels(df, gfc_loss_patch, historical_dir):
@@ -253,7 +251,7 @@ def quality_check(df):
 
 
 # ============================================================================
-# STEP 4: TRAIN/TEST SPLIT (TEMPORAL)
+# STEP 4: TRAIN/TEST SPLIT 
 # ============================================================================
 
 def create_train_test_split(df, test_year=2024):
