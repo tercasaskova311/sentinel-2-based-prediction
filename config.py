@@ -54,12 +54,17 @@ class PreprocessingConfig:
     NDMI_BAND = 2
     
     # Valid value ranges (after normalization to 0-1)
-    VALID_RANGE = (-1.0, 1.0)
+    VALID_RANGE = (-1.5, 1.5)
     
     # Cloud/artifact filtering
-    OUTLIER_THRESHOLD_STD = 3.0  # Remove values > 3 std devs from mean
-    MIN_VALID_PIXELS_FRACTION = 0.5  # At least 50% valid pixels required
+    OUTLIER_THRESHOLD_STD = 4.0  # Remove values > 3 std devs from mean
+    MIN_VALID_PIXELS_FRACTION = 0.15  # At least 50% valid pixels required
     
+    # Nodata value handling
+    NODATA_VALUES = [-9999, -32768, 0, 32767]  # Common nodata values to mask
+    EXTREME_VALUE_THRESHOLD = 10.0  # Mask values > 10 after normalization (likely errors)
+    
+
     # Date extraction patterns
     DATE_PATTERNS = [
         r"(\d{4})[-_](\d{2})[-_](\d{2})",  # YYYY-MM-DD or YYYY_MM_DD
@@ -73,6 +78,10 @@ class PreprocessingConfig:
         r"^\.",          # Hidden files
         r"^\._",         # macOS resource forks
     ]
+    # Enhanced quality checks
+    CHECK_FOR_ZEROS = True  # Flag images with too many zeros
+    MAX_ZERO_FRACTION = 0.5  # Max 50% zeros allowed
+
 
 # LABELING PARAMETERS
 # ============================================================================
@@ -80,21 +89,25 @@ class LabelingConfig:
     """Settings for disturbance labeling"""
     
     # GFC (Global Forest Change) labeling
-    GFC_MIN_LOSS_FRACTION = 0.005  # Min 0.5% of AOI lost to label as disturbance
-    GFC_CONFIDENCE_SCALE = 10.0    # Scale fraction to confidence (0-1)
+    GFC_MIN_LOSS_FRACTION = 0.003  # Min 0.5% of AOI lost to label as disturbance
+    GFC_CONFIDENCE_SCALE = 15.0    # Scale fraction to confidence (0-1)
     
     # NBR anomaly detection
-    NBR_DROP_THRESHOLD = 0.15      # Minimum NBR drop to consider
-    NBR_ANOMALY_STD_THRESHOLD = 2.0  # Std devs from seasonal baseline
+    NBR_DROP_THRESHOLD = 0.12      # Minimum NBR drop to consider
+    NBR_ANOMALY_STD_THRESHOLD = 1.8  # Std devs from seasonal baseline
     NBR_ROLLING_WINDOW = 5         # Number of observations for baseline
     
     # Spatial anomaly detection
-    SPATIAL_STD_THRESHOLD = 0.15   # High spatial variation indicates disturbance
-    SPATIAL_MIN_AFFECTED = 0.1     # Min 10% of area must show low values
+    SPATIAL_STD_THRESHOLD = 0.12   # High spatial variation indicates disturbance
+    SPATIAL_MIN_AFFECTED = 0.08     # Min 10% of area must show low values
     
     # Label confidence thresholds
-    HIGH_CONFIDENCE_THRESHOLD = 0.7
-    MEDIUM_CONFIDENCE_THRESHOLD = 0.4
+    HIGH_CONFIDENCE_THRESHOLD = 0.65
+    MEDIUM_CONFIDENCE_THRESHOLD = 0.35
+
+    # Handle missing data in labeling
+    ALLOW_INTERPOLATION = True  # Interpolate missing values in time series
+    MAX_GAP_DAYS = 45  # Maximum gap to interpolate across
 
 # FEATURE ENGINEERING PARAMETERS
 # ============================================================================
@@ -121,6 +134,12 @@ class FeatureConfig:
         'day_of_year', 'month', 'season',
         'days_since_start', 'days_since_prev'
     ]
+        
+    # Missing value handling
+    FILL_METHOD = 'interpolate'  # 'interpolate', 'forward_fill', or 'drop'
+    INTERPOLATION_LIMIT = 3  # Max consecutive values to interpolate
+
+
 
 # ML TRAINING PARAMETERS
 # ============================================================================
@@ -193,6 +212,7 @@ class ReportingConfig:
     PREPROCESSING_REPORT = OUTPUT_DIR / "report_01_preprocessing.txt"
     LABELING_REPORT = OUTPUT_DIR / "report_02_labeling.txt"
     TRAINING_REPORT = OUTPUT_DIR / "report_03_training.txt"
+    QUALITY_REPORT = OUTPUT_DIR / "report_00_data_quality.txt"  # New
 
 # VALIDATION CHECKS
 # ============================================================================
@@ -225,19 +245,26 @@ def print_config_summary():
     print("="*70)
     print("CONFIGURATION SUMMARY")
     print("="*70)
-    print(f"\n📁 Data Directories:")
+    print(f"\n Data Directories:")
     print(f"   Historical: {DataPaths.HISTORICAL_DIR}")
     print(f"   Output:     {OUTPUT_DIR}")
     
-    print(f"\n🏷️  Labeling Settings:")
+    print(f"\n🔧 Preprocessing Settings:")
+    print(f"   Min valid pixels: {PreprocessingConfig.MIN_VALID_PIXELS_FRACTION*100:.0f}%")
+    print(f"   Valid range: {PreprocessingConfig.VALID_RANGE}")
+    print(f"   Outlier threshold: {PreprocessingConfig.OUTLIER_THRESHOLD_STD} std devs")
+    
+    print(f"\n  Labeling Settings:")
     print(f"   GFC threshold:      {LabelingConfig.GFC_MIN_LOSS_FRACTION*100:.1f}%")
     print(f"   NBR drop threshold: {LabelingConfig.NBR_DROP_THRESHOLD:.2f}")
-    
-    print(f"\n🤖 ML Settings:")
+    print(f"   Interpolation:      {LabelingConfig.ALLOW_INTERPOLATION}")
+
+    print(f"\n ML Settings:")
     print(f"   Test year:    {MLConfig.TEST_YEAR}")
     print(f"   Random seed:  {MLConfig.RANDOM_SEED}")
     print(f"   Class weights: {MLConfig.USE_CLASS_WEIGHTS}")
-    
+    print(f"   Use SMOTE:      {MLConfig.USE_SMOTE}")
+
     print("="*70)
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 """
-Sentinel-2 Preprocessing - Improved Version
-Extracts time series, handles messy filenames, quality filtering
-Saves outputs in multiple formats for ML pipeline
+Sentinel-2 Preprocessing - Enhanced with Robust Null Handling
+Handles masked/nodata values properly and provides detailed diagnostics
 """
 import os
 import re
@@ -23,13 +22,7 @@ from config import (
 # ============================================================================
 
 def extract_date_from_filename(fname):
-    """
-    Robustly extract date from various filename formats:
-    - sumava_2020-10-25.tif
-    - sumava_2021_04_17.tif
-    - sumava_2021_04_17(1).tif
-    - regionA_sumava_2022_07_02.tif
-    """
+    """Robustly extract date from various filename formats"""
     for pattern in PreprocessingConfig.DATE_PATTERNS:
         match = re.search(pattern, fname)
         if match:
@@ -51,64 +44,126 @@ def should_skip_file(filename):
     return False
 
 # ============================================================================
-# DATA LOADING & VALIDATION
+# ENHANCED DATA LOADING WITH NULL HANDLING
 # ============================================================================
+
+def clean_band_data(band, band_name="band"):
+    """
+    Clean a single band by:
+    1. Masking nodata values
+    2. Masking extreme outliers
+    3. Masking zeros if they're suspicious
+    """
+    band = band.astype('float32')
+    
+    # Mask common nodata values BEFORE normalization
+    for nodata in PreprocessingConfig.NODATA_VALUES:
+        band[band == nodata] = np.nan
+    
+    # Normalize
+    band = band / PreprocessingConfig.S2_SCALE_FACTOR
+    
+    # Mask extreme values (likely errors)
+    band[np.abs(band) > PreprocessingConfig.EXTREME_VALUE_THRESHOLD] = np.nan
+    
+    # Check for suspicious zeros (if >80% are zeros, likely mask issue)
+    if PreprocessingConfig.CHECK_FOR_ZEROS:
+        zero_fraction = (band == 0).sum() / band.size
+        if zero_fraction > PreprocessingConfig.MAX_ZERO_FRACTION:
+            print(f"    ⚠️  {band_name}: {zero_fraction*100:.1f}% zeros - masking them")
+            band[band == 0] = np.nan
+    
+    return band
+
 
 def load_and_validate_raster(path):
     """
-    Load raster and perform quality checks
+    Load raster with enhanced null handling
     Returns: (ndvi, nbr, ndmi, quality_metrics)
     """
     try:
         with rasterio.open(path) as src:
             # Read all bands
-            arr = src.read().astype('float32')
+            arr = src.read()
             
-            # Normalize to 0-1 range
-            arr /= PreprocessingConfig.S2_SCALE_FACTOR
+            # Get mask (True where valid)
+            mask = src.read_masks()
             
-            # Extract indices
-            ndvi = arr[PreprocessingConfig.NDVI_BAND]
-            nbr = arr[PreprocessingConfig.NBR_BAND]
-            ndmi = arr[PreprocessingConfig.NDMI_BAND]
+            # Clean each band
+            ndvi_raw = arr[PreprocessingConfig.NDVI_BAND].copy()
+            nbr_raw = arr[PreprocessingConfig.NBR_BAND].copy()
+            ndmi_raw = arr[PreprocessingConfig.NDMI_BAND].copy()
+            
+            # Apply mask from raster
+            if mask is not None and mask.size > 0:
+                band_mask = mask[PreprocessingConfig.NDVI_BAND]
+                ndvi_raw[band_mask == 0] = np.nan
+                nbr_raw[band_mask == 0] = np.nan
+                ndmi_raw[band_mask == 0] = np.nan
+            
+            # Clean each band
+            ndvi = clean_band_data(ndvi_raw, "NDVI")
+            nbr = clean_band_data(nbr_raw, "NBR")
+            ndmi = clean_band_data(ndmi_raw, "NDMI")
+            
+            # Calculate valid pixel counts
+            valid_ndvi = np.isfinite(ndvi)
+            valid_nbr = np.isfinite(nbr)
+            valid_ndmi = np.isfinite(ndmi)
+            
+            # Combined valid mask (all three indices must be valid)
+            valid_all = valid_ndvi & valid_nbr & valid_ndmi
             
             # Quality metrics
             metrics = {
-                'valid_ndvi_fraction': np.isfinite(ndvi).sum() / ndvi.size,
-                'valid_nbr_fraction': np.isfinite(nbr).sum() / nbr.size,
-                'valid_ndmi_fraction': np.isfinite(ndmi).sum() / ndmi.size,
+                'total_pixels': ndvi.size,
+                'valid_ndvi_count': valid_ndvi.sum(),
+                'valid_nbr_count': valid_nbr.sum(),
+                'valid_ndmi_count': valid_ndmi.sum(),
+                'valid_all_count': valid_all.sum(),
+                'valid_ndvi_fraction': valid_ndvi.sum() / ndvi.size,
+                'valid_nbr_fraction': valid_nbr.sum() / nbr.size,
+                'valid_ndmi_fraction': valid_ndmi.sum() / ndmi.size,
+                'valid_all_fraction': valid_all.sum() / ndvi.size,
                 'ndvi_range': (np.nanmin(ndvi), np.nanmax(ndvi)),
                 'nbr_range': (np.nanmin(nbr), np.nanmax(nbr)),
-                'ndmi_range': (np.nanmin(ndmi), np.nanmax(ndmi))
+                'ndmi_range': (np.nanmin(ndmi), np.nanmax(ndmi)),
+                'ndvi_has_data': np.isfinite(ndvi).any(),
+                'nbr_has_data': np.isfinite(nbr).any(),
+                'ndmi_has_data': np.isfinite(ndmi).any()
             }
             
             return ndvi, nbr, ndmi, metrics
             
     except Exception as e:
-        print(f"  ⚠️  Error reading {path}: {e}")
+        print(f"  ⚠️  Error reading {path.name}: {e}")
         return None, None, None, None
 
 
 def is_valid_observation(metrics):
-    """Check if observation meets quality criteria"""
+    """Enhanced validation with better diagnostics"""
     if metrics is None:
-        return False
+        return False, "No metrics"
+    
+    # Check if any data exists at all
+    if not (metrics['ndvi_has_data'] and metrics['nbr_has_data'] and metrics['ndmi_has_data']):
+        return False, "No valid data in one or more bands"
     
     # Check sufficient valid pixels
     min_fraction = PreprocessingConfig.MIN_VALID_PIXELS_FRACTION
-    if (metrics['valid_ndvi_fraction'] < min_fraction or
-        metrics['valid_nbr_fraction'] < min_fraction or
-        metrics['valid_ndmi_fraction'] < min_fraction):
-        return False
+    if metrics['valid_all_fraction'] < min_fraction:
+        return False, f"Valid pixels {metrics['valid_all_fraction']*100:.1f}% < {min_fraction*100:.0f}%"
     
     # Check value ranges
     valid_min, valid_max = PreprocessingConfig.VALID_RANGE
-    for key in ['ndvi_range', 'nbr_range', 'ndmi_range']:
+    for key, name in [('ndvi_range', 'NDVI'), ('nbr_range', 'NBR'), ('ndmi_range', 'NDMI')]:
         min_val, max_val = metrics[key]
-        if min_val < valid_min - 0.5 or max_val > valid_max + 0.5:
-            return False
+        if not np.isfinite(min_val) or not np.isfinite(max_val):
+            return False, f"{name} has no finite values"
+        if min_val < valid_min or max_val > valid_max:
+            return False, f"{name} out of range [{min_val:.2f}, {max_val:.2f}]"
     
-    return True
+    return True, "OK"
 
 # ============================================================================
 # PREPROCESSING WORKFLOW
@@ -116,15 +171,10 @@ def is_valid_observation(metrics):
 
 def preprocess_sentinel_data():
     """
-    Main preprocessing workflow:
-    1. Scan directory for TIFFs
-    2. Extract dates from filenames
-    3. Load rasters and compute statistics
-    4. Quality filtering
-    5. Save results
+    Main preprocessing workflow with detailed diagnostics
     """
     print("\n" + "="*70)
-    print("SENTINEL-2 PREPROCESSING")
+    print("SENTINEL-2 PREPROCESSING - ENHANCED NULL HANDLING")
     print("="*70)
     
     # Validate configuration
@@ -143,29 +193,59 @@ def preprocess_sentinel_data():
     
     print(f"   Found {len(tif_files)} TIFF files")
     
-    # Process each file
+    if len(tif_files) == 0:
+        raise RuntimeError(f"No TIFF files found in {historical_dir}")
+    
+    # Process each file with detailed tracking
     records = []
     skipped = []
+    diagnostics = {
+        'no_date': 0,
+        'no_data': 0,
+        'insufficient_pixels': 0,
+        'out_of_range': 0,
+        'other_error': 0,
+        'success': 0
+    }
     
     print(f"\n📊 Processing files...")
     for i, tif_path in enumerate(tif_files, 1):
-        if i % 10 == 0:
-            print(f"   Progress: {i}/{len(tif_files)}")
+        if i % 5 == 0 or i == 1:
+            print(f"   Progress: {i}/{len(tif_files)} ({i/len(tif_files)*100:.0f}%)")
         
         # Extract date
         date = extract_date_from_filename(tif_path.name)
         if date is None:
             skipped.append((tif_path.name, "No date found"))
+            diagnostics['no_date'] += 1
             continue
         
         # Load and validate
         ndvi, nbr, ndmi, metrics = load_and_validate_raster(tif_path)
         
-        if not is_valid_observation(metrics):
-            skipped.append((tif_path.name, "Failed quality checks"))
+        if metrics is None:
+            skipped.append((tif_path.name, "Load error"))
+            diagnostics['other_error'] += 1
             continue
         
-        # Compute statistics
+        # Check validity
+        is_valid, reason = is_valid_observation(metrics)
+        
+        if not is_valid:
+            skipped.append((tif_path.name, reason))
+            
+            # Categorize failure
+            if 'No valid data' in reason:
+                diagnostics['no_data'] += 1
+            elif 'Valid pixels' in reason:
+                diagnostics['insufficient_pixels'] += 1
+            elif 'out of range' in reason:
+                diagnostics['out_of_range'] += 1
+            else:
+                diagnostics['other_error'] += 1
+            continue
+        
+        # Compute statistics (using nanmean to ignore NaN values)
         record = {
             'date': date,
             'year': date.year,
@@ -179,12 +259,12 @@ def preprocess_sentinel_data():
             'NBR_mean': float(np.nanmean(nbr)),
             'NDMI_mean': float(np.nanmean(ndmi)),
             
-            # Standard deviations (spatial heterogeneity)
+            # Standard deviations
             'NDVI_std': float(np.nanstd(ndvi)),
             'NBR_std': float(np.nanstd(nbr)),
             'NDMI_std': float(np.nanstd(ndmi)),
             
-            # Percentiles (distribution shape)
+            # Percentiles
             'NDVI_p10': float(np.nanpercentile(ndvi, 10)),
             'NDVI_p25': float(np.nanpercentile(ndvi, 25)),
             'NDVI_p50': float(np.nanpercentile(ndvi, 50)),
@@ -204,42 +284,68 @@ def preprocess_sentinel_data():
             'NDMI_p90': float(np.nanpercentile(ndmi, 90)),
             
             # Quality metrics
-            'valid_fraction': float(np.mean([
-                metrics['valid_ndvi_fraction'],
-                metrics['valid_nbr_fraction'],
-                metrics['valid_ndmi_fraction']
-            ]))
+            'valid_fraction': float(metrics['valid_all_fraction']),
+            'total_pixels': int(metrics['total_pixels']),
+            'valid_pixels': int(metrics['valid_all_count'])
         }
         
         records.append(record)
+        diagnostics['success'] += 1
+    
+    # Print diagnostics
+    print("\n" + "="*70)
+    print("PROCESSING DIAGNOSTICS")
+    print("="*70)
+    print(f"✅ Successful:            {diagnostics['success']}")
+    print(f"❌ Skipped - No date:     {diagnostics['no_date']}")
+    print(f"❌ Skipped - No data:     {diagnostics['no_data']}")
+    print(f"❌ Skipped - Few pixels:  {diagnostics['insufficient_pixels']}")
+    print(f"❌ Skipped - Out of range: {diagnostics['out_of_range']}")
+    print(f"❌ Skipped - Other:       {diagnostics['other_error']}")
+    print(f"📊 Total processed:       {len(tif_files)}")
     
     # Create DataFrame
     if not records:
-        raise RuntimeError("No valid observations processed!")
+        print("\n❌ ERROR: No valid observations processed!")
+        print("\nShowing first 10 skipped files:")
+        for fname, reason in skipped[:10]:
+            print(f"   {fname}: {reason}")
+        raise RuntimeError("No valid data - check your input files and config settings")
     
     df = pd.DataFrame(records)
     df = df.sort_values('date').reset_index(drop=True)
     
     print(f"\n✅ Successfully processed {len(df)} observations")
-    if skipped:
-        print(f"⚠️  Skipped {len(skipped)} files:")
-        for fname, reason in skipped[:5]:
-            print(f"   - {fname}: {reason}")
-        if len(skipped) > 5:
-            print(f"   ... and {len(skipped) - 5} more")
     
-    return df, skipped
+    if skipped and len(skipped) <= 20:
+        print(f"\n⚠️  Skipped files ({len(skipped)}):")
+        for fname, reason in skipped:
+            print(f"   - {fname}: {reason}")
+    elif skipped:
+        print(f"\n⚠️  Skipped {len(skipped)} files (showing first 10):")
+        for fname, reason in skipped[:10]:
+            print(f"   - {fname}: {reason}")
+    
+    return df, skipped, diagnostics
 
 # ============================================================================
 # DATA QUALITY REPORT
 # ============================================================================
 
-def generate_quality_report(df):
+def generate_quality_report(df, diagnostics):
     """Generate comprehensive quality report"""
     report_lines = []
     report_lines.append("="*70)
     report_lines.append("PREPROCESSING QUALITY REPORT")
     report_lines.append("="*70)
+    
+    # Processing summary
+    report_lines.append("\n📊 PROCESSING SUMMARY:")
+    report_lines.append(f"   Successfully processed: {diagnostics['success']}")
+    report_lines.append(f"   Skipped (no date):      {diagnostics['no_date']}")
+    report_lines.append(f"   Skipped (no data):      {diagnostics['no_data']}")
+    report_lines.append(f"   Skipped (few pixels):   {diagnostics['insufficient_pixels']}")
+    report_lines.append(f"   Skipped (out of range): {diagnostics['out_of_range']}")
     
     # Temporal coverage
     report_lines.append("\n📅 TEMPORAL COVERAGE:")
@@ -261,18 +367,20 @@ def generate_quality_report(df):
     report_lines.append(f"   Median: {time_gaps.median():.1f} days")
     report_lines.append(f"   Max: {time_gaps.max():.0f} days")
     
-    # Value ranges
+    # Value ranges and statistics
     report_lines.append("\n📈 VALUE RANGES:")
     for col in ['NDVI_mean', 'NBR_mean', 'NDMI_mean']:
-        report_lines.append(f"   {col}: [{df[col].min():.3f}, {df[col].max():.3f}]")
+        report_lines.append(f"   {col}: [{df[col].min():.3f}, {df[col].max():.3f}] (μ={df[col].mean():.3f})")
     
     # Data quality
     report_lines.append("\n✅ DATA QUALITY:")
     report_lines.append(f"   Avg valid fraction: {df['valid_fraction'].mean()*100:.1f}%")
+    report_lines.append(f"   Min valid fraction: {df['valid_fraction'].min()*100:.1f}%")
+    report_lines.append(f"   Avg valid pixels: {df['valid_pixels'].mean():.0f}/{df['total_pixels'].iloc[0]}")
     report_lines.append(f"   Missing values: {df.isnull().sum().sum()}")
     
     report = "\n".join(report_lines)
-    print(report)
+    print("\n" + report)
     
     # Save report
     if ReportingConfig.SAVE_INTERMEDIATE_RESULTS:
@@ -287,12 +395,12 @@ def generate_quality_report(df):
 # ============================================================================
 
 def plot_time_series(df):
-    """Plot vegetation indices time series"""
-    fig, axes = plt.subplots(3, 1, figsize=VisualizationConfig.MEDIUM_PLOT, sharex=True)
+    """Plot vegetation indices time series with quality indicators"""
+    fig, axes = plt.subplots(4, 1, figsize=(14, 12), sharex=True)
     
     # NDVI
     axes[0].plot(df['date'], df['NDVI_mean'], 'o-', 
-                color=VisualizationConfig.COLORS['info'], alpha=0.6)
+                color=VisualizationConfig.COLORS['info'], alpha=0.6, markersize=4)
     axes[0].fill_between(df['date'], 
                          df['NDVI_mean'] - df['NDVI_std'],
                          df['NDVI_mean'] + df['NDVI_std'],
@@ -300,31 +408,43 @@ def plot_time_series(df):
     axes[0].set_ylabel('NDVI')
     axes[0].set_title('Vegetation Indices Time Series - Šumava National Park')
     axes[0].grid(alpha=0.3)
+    axes[0].axhline(y=0, color='gray', linestyle='--', alpha=0.5)
     
     # NBR
     axes[1].plot(df['date'], df['NBR_mean'], 'o-',
-                color=VisualizationConfig.COLORS['normal'], alpha=0.6)
+                color=VisualizationConfig.COLORS['normal'], alpha=0.6, markersize=4)
     axes[1].fill_between(df['date'],
                          df['NBR_mean'] - df['NBR_std'],
                          df['NBR_mean'] + df['NBR_std'],
                          alpha=0.2, color=VisualizationConfig.COLORS['normal'])
     axes[1].set_ylabel('NBR')
     axes[1].grid(alpha=0.3)
+    axes[1].axhline(y=0, color='gray', linestyle='--', alpha=0.5)
     
     # NDMI
     axes[2].plot(df['date'], df['NDMI_mean'], 'o-',
-                color=VisualizationConfig.COLORS['warning'], alpha=0.6)
+                color=VisualizationConfig.COLORS['warning'], alpha=0.6, markersize=4)
     axes[2].fill_between(df['date'],
                          df['NDMI_mean'] - df['NDMI_std'],
                          df['NDMI_mean'] + df['NDMI_std'],
                          alpha=0.2, color=VisualizationConfig.COLORS['warning'])
     axes[2].set_ylabel('NDMI')
-    axes[2].set_xlabel('Date')
     axes[2].grid(alpha=0.3)
+    axes[2].axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    
+    # Valid pixel fraction
+    axes[3].plot(df['date'], df['valid_fraction']*100, 'o-',
+                color='purple', alpha=0.6, markersize=4)
+    axes[3].axhline(y=PreprocessingConfig.MIN_VALID_PIXELS_FRACTION*100, 
+                   color='red', linestyle='--', label='Min threshold')
+    axes[3].set_ylabel('Valid Pixels (%)')
+    axes[3].set_xlabel('Date')
+    axes[3].grid(alpha=0.3)
+    axes[3].legend()
     
     plt.tight_layout()
     plt.savefig(DataPaths.PREPROCESSING_PLOT, 
-                dpi=VisualizationConfig.FIGURE_DPI)
+                dpi=VisualizationConfig.FIGURE_DPI, bbox_inches='tight')
     print(f"📊 Plot saved: {DataPaths.PREPROCESSING_PLOT}")
     plt.show()
 
@@ -333,24 +453,29 @@ def plot_time_series(df):
 # ============================================================================
 
 def save_preprocessed_data(df):
-    """Save in multiple formats for downstream use"""
+    """Save in multiple formats"""
     print("\n💾 Saving preprocessed data...")
     
-    # CSV (human-readable, universally compatible)
+    # CSV
     df.to_csv(DataPaths.PREPROCESSED_CSV, index=False)
     print(f"   ✓ CSV: {DataPaths.PREPROCESSED_CSV}")
     
-    # Pickle (fast loading, preserves dtypes)
+    # Pickle
     df.to_pickle(DataPaths.PREPROCESSED_PKL)
     print(f"   ✓ Pickle: {DataPaths.PREPROCESSED_PKL}")
     
-    # Metadata file
+    # Metadata
     metadata = {
         'n_observations': len(df),
-        'date_range': (df['date'].min(), df['date'].max()),
+        'date_range': (str(df['date'].min()), str(df['date'].max())),
         'years': sorted(df['year'].unique().tolist()),
         'columns': df.columns.tolist(),
-        'preprocessing_date': datetime.now().isoformat()
+        'preprocessing_date': datetime.now().isoformat(),
+        'config_settings': {
+            'min_valid_fraction': PreprocessingConfig.MIN_VALID_PIXELS_FRACTION,
+            'valid_range': PreprocessingConfig.VALID_RANGE,
+            'scale_factor': PreprocessingConfig.S2_SCALE_FACTOR
+        }
     }
     
     metadata_path = DataPaths.OUTPUT_DIR / "01_preprocessing_metadata.pkl"
@@ -365,14 +490,14 @@ def save_preprocessed_data(df):
 def main():
     """Run complete preprocessing workflow"""
     print("\n" + "="*70)
-    print("🛰️  SENTINEL-2 PREPROCESSING PIPELINE")
+    print("🛰️  SENTINEL-2 PREPROCESSING PIPELINE - ENHANCED")
     print("="*70)
     
     # Step 1: Process data
-    df, skipped = preprocess_sentinel_data()
+    df, skipped, diagnostics = preprocess_sentinel_data()
     
     # Step 2: Quality report
-    generate_quality_report(df)
+    generate_quality_report(df, diagnostics)
     
     # Step 3: Visualize
     plot_time_series(df)

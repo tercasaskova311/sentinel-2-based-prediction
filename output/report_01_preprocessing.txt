@@ -1,0 +1,38 @@
+======================================================================
+PREPROCESSING QUALITY REPORT
+======================================================================
+
+📊 PROCESSING SUMMARY:
+   Successfully processed: 77
+   Skipped (no date):      0
+   Skipped (no data):      0
+   Skipped (few pixels):   42
+   Skipped (out of range): 0
+
+📅 TEMPORAL COVERAGE:
+   Date range: 2020-04-15 00:00:00 to 2024-10-21 00:00:00
+   Total span: 1650 days
+   Observations: 77
+
+📊 OBSERVATIONS PER YEAR:
+   2020: 15
+   2021: 15
+   2022: 19
+   2023: 15
+   2024: 13
+
+⏱️  TIME GAPS:
+   Mean: 21.7 days
+   Median: 12.0 days
+   Max: 185 days
+
+📈 VALUE RANGES:
+   NDVI_mean: [0.000, 0.000] (μ=0.000)
+   NBR_mean: [0.000, 0.000] (μ=0.000)
+   NDMI_mean: [0.000, 0.000] (μ=0.000)
+
+✅ DATA QUALITY:
+   Avg valid fraction: 39.9%
+   Min valid fraction: 19.2%
+   Avg valid pixels: 2919402/7325112
+   Missing values: 0
