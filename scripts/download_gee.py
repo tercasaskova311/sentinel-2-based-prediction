@@ -5,13 +5,13 @@ import os
 from datetime import datetime
 
 # CONFIGURATION
-AOI_PATH = "sumava_aoi_clean.geojson"
+AOI_PATH = "data/boundaries/sumava_aoi_clean.geojson"
 OUTPUT_DIR = "data/historical"
 RESOLUTION = 20
 START_YEAR = 2020
 END_YEAR = 2024
 MAX_CLOUD_COVERAGE = 30
-TEMPORAL_INTERVAL_DAYS = 16
+TEMPORAL_INTERVAL_DAYS = 5
 
 # INITIALIZE EE
 ee.Initialize(project='youtubeapi-455317')
