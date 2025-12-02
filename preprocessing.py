@@ -1,3 +1,4 @@
+#Export started: 2022-08-16
 import os
 import re
 from pathlib import Path
@@ -335,7 +336,7 @@ def debug_single_file(path):
                 else:
                     print(f"  {key}: {val}")
         else:
-            print(f"\n❌ FAILED: {error}")
+            print(f"\n FAILED: {error}")
 
 
 # ============================================================
