@@ -4,23 +4,29 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import rasterio
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+GDRIVE_ROOT = Path.home() / "Library/CloudStorage"
+gdrive_folders = list(GDRIVE_ROOT.glob("GoogleDrive-*"))
+
+if gdrive_folders:
+    MY_DRIVE = gdrive_folders[0] / "My Drive"
+    DRIVE_INPUT_DIR = MY_DRIVE / "sumava_full"
+else:
+    raise FileNotFoundError("did not find Google Drive folder")
+
+OUTPUT_DIR = Path("output")
+OUTPUT_CSV = OUTPUT_DIR / "01_preprocessed_timeseries.csv"
+OUTPUT_PKL = OUTPUT_DIR / "01_preprocessed_timeseries.pkl"
+
+MIN_VALID_FRACTION = 0.30
+COMPOSITE_DAYS = 10  # Create 10-day composites = basically means downloading every 10 days
+USE_PARALLEL = True  
+MAX_WORKERS = 2  # Reduce if crashes....
 
 # ============================================================================
-# CONFIG
-# ============================================================================
 
-INPUT_DIR = "data/historical"
-OUTPUT_CSV = "output/01_preprocessed_timeseries.csv"
-OUTPUT_PKL = "output/01_preprocessed_timeseries.pkl"
-
-MIN_VALID_FRACTION = 0.30  # At least 30% valid pixels in given image...
-
-# ============================================================================
-# FUNCTIONS
-# ============================================================================
-
-def extract_date(filename):
-    """Extract date from filename"""
+def extract_date(filename): #from the filename
     match = re.search(r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})", str(filename))
     if match:
         try:
@@ -30,25 +36,26 @@ def extract_date(filename):
     return None
 
 
-def process_tiff(filepath):
-    """Process one TIFF file"""
+def process_tiff_efficient(filepath):
+    """Process one TIFF file with downsampling to save memory"""
     try:
         with rasterio.open(filepath) as src:
-            arr = src.read().astype(np.float32)
+            scale = 2
+            
+            arr = src.read(
+                out_shape=(
+                    src.count,
+                    src.height // scale,
+                    src.width // scale
+                ),
+                resampling=rasterio.enums.Resampling.average
+            ).astype(np.float32)
             
             if arr.shape[0] != 8:
                 return None, f"Expected 8 bands, got {arr.shape[0]}"
             
-            # Extract bands
-            # Band order: B4, B8, B11, B12, SCL, NDVI, NBR, NDMI
-            b4 = arr[0]
-            b8 = arr[1]
-            b11 = arr[2]
-            b12 = arr[3]
-            scl = arr[4]
-            ndvi = arr[5]  # Already computed by GEE
-            nbr = arr[6]
-            ndmi = arr[7]
+            # Extract bands: B4, B8, B11, B12, SCL, NDVI, NBR, NDMI
+            b4, b8, b11, b12, scl, ndvi, nbr, ndmi = arr
             
             # Mask bad pixels using SCL
             good = (
@@ -77,7 +84,7 @@ def process_tiff(filepath):
             if date is None:
                 return None, "No date in filename"
             
-            # Compute stats
+            # Compute stats (faster on downsampled data)
             stats = {
                 "date": date,
                 "year": date.year,
@@ -108,13 +115,6 @@ def process_tiff(filepath):
                 "NDMI_p10": float(np.nanpercentile(ndmi, 10)),
                 "NDMI_p50": float(np.nanpercentile(ndmi, 50)),
                 "NDMI_p90": float(np.nanpercentile(ndmi, 90)),
-                
-                "NDVI_min": float(np.nanmin(ndvi)),
-                "NDVI_max": float(np.nanmax(ndvi)),
-                "NBR_min": float(np.nanmin(nbr)),
-                "NBR_max": float(np.nanmax(nbr)),
-                "NDMI_min": float(np.nanmin(ndmi)),
-                "NDMI_max": float(np.nanmax(ndmi)),
             }
             
             return stats, None
@@ -123,23 +123,148 @@ def process_tiff(filepath):
         return None, f"Error: {str(e)}"
 
 
-def process_directory(input_dir):
-    """Process all TIFFs in directory"""
+def assign_composite_period(date, days=10):
+    """Assign image to composite period"""
+    from datetime import timedelta
+    year = date.year
+    day_of_year = date.timetuple().tm_yday
+    period = (day_of_year - 1) // days
+    
+    # Create period start date
+    period_start = datetime(year, 1, 1) + timedelta(days=period * days)
+    return period_start
+
+
+def create_composites(df, days=10):
+    """Create temporal composites from all images"""
+    print(f"\n{'='*70}")
+    print(f"CREATING {days}-DAY COMPOSITES")
+    print(f"{'='*70}")
+    
+    # Assign composite periods
+    df['composite_period'] = df['date'].apply(
+        lambda x: assign_composite_period(x, days)
+    )
+    
+    print(f"\nImages: {len(df)}")
+    print(f"Periods: {df['composite_period'].nunique()}")
+    
+    # Group by period and aggregate
+    composites = df.groupby('composite_period').agg({
+        'NDVI_mean': 'mean',
+        'NBR_mean': 'mean',
+        'NDMI_mean': 'mean',
+        'NDVI_std': 'mean',
+        'NBR_std': 'mean',
+        'NDMI_std': 'mean',
+        'NDVI_p50': 'median',
+        'NBR_p50': 'median',
+        'NDMI_p50': 'median',
+        'valid_fraction': 'mean',
+        'date': 'first',
+        'filename': 'count'
+    }).reset_index()
+    
+    # Rename count column
+    composites.rename(columns={'filename': 'n_images'}, inplace=True)
+    
+    # Add temporal features
+    composites['year'] = composites['date'].dt.year
+    composites['month'] = composites['date'].dt.month
+    composites['day_of_year'] = composites['date'].dt.dayofyear
+    
+    print(f"\nComposites created: {len(composites)}")
+    print(f"Avg images per composite: {composites['n_images'].mean():.1f}")
+    
+    return composites.sort_values('date').reset_index(drop=True)
+
+
+def process_directory_parallel(input_dir, max_workers=2):
+    """Process all TIFFs with parallel processing"""
     tiff_files = list(Path(input_dir).rglob("*.tif"))
     tiff_files = [f for f in tiff_files if not f.name.startswith('.')]
     
     print(f"\n{'='*70}")
     print(f"PREPROCESSING: {len(tiff_files)} files found")
+    print(f"Using {max_workers} workers")
+    print(f"{'='*70}")
+    
+    records = []
+    skipped = []
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_tiff_efficient, f): f 
+                  for f in tiff_files}
+        
+        for i, future in enumerate(as_completed(futures), 1):
+            if i % 10 == 0 or i == len(tiff_files):
+                print(f"Processed: {i}/{len(tiff_files)} ({i/len(tiff_files)*100:.1f}%)")
+            
+            filepath = futures[future]
+            try:
+                stats, error = future.result()
+                if stats:
+                    records.append(stats)
+                else:
+                    skipped.append((filepath.name, error))
+            except Exception as e:
+                skipped.append((filepath.name, str(e)))
+    
+    if not records:
+        print("\n No valid images processed!")
+        return None
+    
+    df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
+    
+    # Summary
+    print(f"\n{'='*70}")
+    print(f"RESULTS")
+    print(f"{'='*70}")
+    print(f"✓ Processed: {len(records)}")
+    print(f"✗ Skipped: {len(skipped)}")
+    
+    print(f"\nDate range: {df['date'].min()} → {df['date'].max()}")
+    print(f"Total span: {(df['date'].max() - df['date'].min()).days} days")
+    
+    print(f"\nPer year:")
+    for year, count in df.groupby('year').size().items():
+        print(f"   {year}: {count}")
+    
+    print(f"\nValue ranges:")
+    print(f"   NDVI: [{df['NDVI_mean'].min():.3f}, {df['NDVI_mean'].max():.3f}]")
+    print(f"   NBR:  [{df['NBR_mean'].min():.3f}, {df['NBR_mean'].max():.3f}]")
+    print(f"   NDMI: [{df['NDMI_mean'].min():.3f}, {df['NDMI_mean'].max():.3f}]")
+    
+    print(f"\nQuality:")
+    print(f"   Avg valid: {df['valid_fraction'].mean()*100:.1f}%")
+    print(f"   Min valid: {df['valid_fraction'].min()*100:.1f}%")
+    
+    if skipped:
+        print(f"\n Skipped files (first 10):")
+        for name, reason in skipped[:10]:
+            print(f"   • {name}: {reason}")
+    
+    return df
+
+
+def process_directory_serial(input_dir):
+    """Process all TIFFs serially (safer for low memory)"""
+    tiff_files = list(Path(input_dir).rglob("*.tif"))
+    tiff_files = [f for f in tiff_files if not f.name.startswith('.')]
+    
+    print(f"\n{'='*70}")
+    print(f"PREPROCESSING: {len(tiff_files)} files found")
+    print(f"Serial processing (safer for memory)")
     print(f"{'='*70}")
     
     records = []
     skipped = []
     
     for i, filepath in enumerate(tiff_files, 1):
-        if i % 5 == 0:
-            print(f"Processing {i}/{len(tiff_files)}...")
+        if i % 10 == 0 or i == len(tiff_files):
+            print(f"Processing {i}/{len(tiff_files)} ({i/len(tiff_files)*100:.1f}%)")
         
-        stats, error = process_tiff(filepath)
+        stats, error = process_tiff_efficient(filepath)
         
         if stats:
             records.append(stats)
@@ -152,96 +277,52 @@ def process_directory(input_dir):
     
     df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
     
-    # Summary
-    print(f"\n{'='*70}")
+    # Same summary as parallel version
     print(f"RESULTS")
-    print(f"{'='*70}")
     print(f" Processed: {len(records)}")
     print(f" Skipped: {len(skipped)}")
     
-    print(f"\n Date range: {df['date'].min()} to {df['date'].max()}")
-    
-    print(f"\n Per year:")
-    for year, count in df.groupby('year').size().items():
-        print(f"   {year}: {count}")
-    
-    print(f"\n Value ranges:")
-    print(f"   NDVI: [{df['NDVI_mean'].min():.3f}, {df['NDVI_mean'].max():.3f}]")
-    print(f"   NBR:  [{df['NBR_mean'].min():.3f}, {df['NBR_mean'].max():.3f}]")
-    print(f"   NDMI: [{df['NDMI_mean'].min():.3f}, {df['NDMI_mean'].max():.3f}]")
-    
-    print(f"\n Quality:")
-    print(f"   Avg valid: {df['valid_fraction'].mean()*100:.1f}%")
-    print(f"   Min valid: {df['valid_fraction'].min()*100:.1f}%")
-    
-    if skipped:
-        print(f"\n  Skipped (first 5):")
-        for name, reason in skipped[:5]:
-            print(f"   {name}: {reason}")
-    
     return df
 
-
-def debug_file(filepath):
-    """Debug single file"""
-    print(f"\n{'='*70}")
-    print(f"DEBUG: {filepath}")
-    print(f"{'='*70}")
-    
-    with rasterio.open(filepath) as src:
-        print(f"\nBands: {src.count}")
-        print(f"Size: {src.width} x {src.height}")
-        print(f"CRS: {src.crs}")
-        
-        arr = src.read()
-        for i in range(min(8, src.count)):
-            band = arr[i]
-            print(f"\nBand {i}:")
-            print(f"  Min: {band.min():.6f}")
-            print(f"  Max: {band.max():.6f}")
-            print(f"  Mean: {band.mean():.6f}")
-    
-    print(f"\n{'='*70}")
-    print("PROCESSING TEST:")
-    print(f"{'='*70}")
-    
-    stats, error = process_tiff(Path(filepath))
-    
-    if stats:
-        print("\n SUCCESS!")
-        for k, v in stats.items():
-            if isinstance(v, float):
-                print(f"  {k}: {v:.6f}")
-            else:
-                print(f"  {k}: {v}")
-    else:
-        print(f"\n FAILED: {error}")
-
-# ============================================================================
-# MAIN
 # ============================================================================
 
 if __name__ == "__main__":
-    import sys
+    # Verify directory exists
+    if not DRIVE_INPUT_DIR.exists():
+        print(f"\n ERROR: Directory not found!")
+        print(f"   Looking for: {DRIVE_INPUT_DIR}")
+        print(f"\n📁 Contents of My Drive:")
+        if MY_DRIVE.exists():
+            for item in sorted(MY_DRIVE.iterdir()):
+                if item.is_dir():
+                    print(f"   📁 {item.name}")
+        print("\n Update the folder name in CONFIG section if needed")
+        exit(1)
     
-    # Debug mode
-    if len(sys.argv) > 1:
-        debug_file(sys.argv[1])
-        sys.exit()
+    # Create output directory
+    OUTPUT_DIR.mkdir(exist_ok=True)
     
-    # Process all
-    df = process_directory(INPUT_DIR)
+    # Process files
+    if USE_PARALLEL:
+        df = process_directory_parallel(DRIVE_INPUT_DIR, max_workers=MAX_WORKERS)
+    else:
+        df = process_directory_serial(DRIVE_INPUT_DIR)
     
     if df is not None:
-        Path("output").mkdir(exist_ok=True)
+        # Save all images
+        df.to_csv(OUTPUT_DIR / "01_all_images.csv", index=False)
+        print(f"\n Saved all images: output/01_all_images.csv ({len(df)} images)")
         
-        df.to_csv(OUTPUT_CSV, index=False)
-        df.to_pickle(OUTPUT_PKL)
+        # Create and save composites
+        composites = create_composites(df, days=COMPOSITE_DAYS)
         
-        print(f"\n Saved:")
-        print(f"   {OUTPUT_CSV}")
-        print(f"   {OUTPUT_PKL}")
+        composites.to_csv(OUTPUT_CSV, index=False)
+        composites.to_pickle(OUTPUT_PKL)
         
-        print(f"\n Preview:")
-        print(df.head())
+        print(f"Raw images:  output/01_all_images.csv ({len(df)} images)")
+        print(f"Composites:  {OUTPUT_CSV} ({len(composites)} composites)")
+        print(f"Pickle:      {OUTPUT_PKL}")
+        
+        print(f"\n Composite Preview:")
+        print(composites[['date', 'year', 'month', 'n_images', 'NDVI_mean', 'NBR_mean', 'NDMI_mean']].head(15))
         
