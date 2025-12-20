@@ -1,6 +1,10 @@
+#process it thought google drive app... GEE => drive export => local drive sync
+#in preprocessing we will: extract date, mask clouds, calculate indices averages, create composites every 10 days
+#plus parallel processing option...
+
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import rasterio
@@ -13,20 +17,19 @@ if gdrive_folders:
     MY_DRIVE = gdrive_folders[0] / "My Drive"
     DRIVE_INPUT_DIR = MY_DRIVE / "sumava_full"
 else:
-    raise FileNotFoundError("did not find Google Drive folder")
+    raise FileNotFoundError("Did not find Google Drive folder")
 
 OUTPUT_DIR = Path("output")
 OUTPUT_CSV = OUTPUT_DIR / "01_preprocessed_timeseries.csv"
 OUTPUT_PKL = OUTPUT_DIR / "01_preprocessed_timeseries.pkl"
 
-MIN_VALID_FRACTION = 0.30
-COMPOSITE_DAYS = 10  # Create 10-day composites = basically means downloading every 10 days
-USE_PARALLEL = True  
-MAX_WORKERS = 2  # Reduce if crashes....
+MIN_VALID_FRACTION = 0.30  # Skip images with <30% valid pixels (too cloudy)
+COMPOSITE_DAYS = 10         # Combine images every 10 days to reduce cloud noise
+USE_PARALLEL = True         # Use parallel processing (faster but more memory)
+MAX_WORKERS = 2             # Reduce if crashes
 
 # ============================================================================
-
-def extract_date(filename): #from the filename
+def extract_date(filename): 
     match = re.search(r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})", str(filename))
     if match:
         try:
@@ -35,92 +38,52 @@ def extract_date(filename): #from the filename
             return None
     return None
 
-
-def process_tiff_efficient(filepath):
-    """Process one TIFF file with downsampling to save memory"""
+def process_tiff(filepath):
+    """
+    Process one TIFF file means:
+    1. Load 4 bands (B8, NDVI, NBR, NDMI) from GEE export
+    2. Mask invalid values (clouds, out-of-range) = check if enough valid pixels (>30%)
+    4. Calculate mean indices
+    """
+    
     try:
         with rasterio.open(filepath) as src:
-            scale = 2
+            arr = src.read().astype(np.float32)
             
-            arr = src.read(
-                out_shape=(
-                    src.count,
-                    src.height // scale,
-                    src.width // scale
-                ),
-                resampling=rasterio.enums.Resampling.average
-            ).astype(np.float32)
+            if arr.shape[0] != 4:
+                return None, f"Expected 4 bands, got {arr.shape[0]}"
             
-            # Handle 4-band images (B8, NDVI, NBR, NDMI)
-            if arr.shape[0] == 4:
-                b8, ndvi, nbr, ndmi = arr
-                # Skip cloud masking since we don't have SCL
-                good = np.ones_like(ndvi, dtype=bool)  # Assume all pixels are good
-                
-            # Handle 8-band images (B4, B8, B11, B12, SCL, NDVI, NBR, NDMI)
-            elif arr.shape[0] == 8:
-                b4, b8, b11, b12, scl, ndvi, nbr, ndmi = arr
-                # Mask bad pixels using SCL
-                good = (
-                    (scl != 0) & (scl != 1) & (scl != 3) &
-                    (scl != 8) & (scl != 9) & (scl != 10) & (scl != 11)
-                )
-            else:
-                return None, f"Expected 4 or 8 bands, got {arr.shape[0]}"
+            b8, ndvi, nbr, ndmi = arr
             
-            # Apply mask
-            ndvi[~good] = np.nan
-            nbr[~good] = np.nan
-            ndmi[~good] = np.nan
-            
-            # Mask invalid ranges
+            #APPLY MASKS - important => cloud masking on given indices = we mask by valid index values
             ndvi[(ndvi < -1) | (ndvi > 1)] = np.nan
             nbr[(nbr < -1) | (nbr > 1)] = np.nan
             ndmi[(ndmi < -1) | (ndmi > 1)] = np.nan
             
-            # Check validity
+            # Check validity - need at least 30% valid pixels
             valid_mask = np.isfinite(ndvi)
             valid_fraction = valid_mask.sum() / ndvi.size
             
             if valid_fraction < MIN_VALID_FRACTION:
                 return None, f"Too few valid pixels: {valid_fraction:.1%}"
             
-            # Get date
+            # Get date from filename
             date = extract_date(filepath.name)
             if date is None:
                 return None, "No date in filename"
             
-            # Compute stats (same as before)
+            # Compute basic statistics for each image - just to get an overview
             stats = {
                 "date": date,
                 "year": date.year,
                 "month": date.month,
-                "day_of_year": date.timetuple().tm_yday,
                 "filename": filepath.name,
-                
                 "valid_fraction": float(valid_fraction),
-                "valid_pixels": int(valid_mask.sum()),
-                "total_pixels": int(ndvi.size),
                 
-                "NDVI_mean": float(np.nanmean(ndvi)),
-                "NBR_mean": float(np.nanmean(nbr)),
-                "NDMI_mean": float(np.nanmean(ndmi)),
-                
-                "NDVI_std": float(np.nanstd(ndvi)),
-                "NBR_std": float(np.nanstd(nbr)),
-                "NDMI_std": float(np.nanstd(ndmi)),
-                
-                "NDVI_p10": float(np.nanpercentile(ndvi, 10)),
-                "NDVI_p50": float(np.nanpercentile(ndvi, 50)),
-                "NDVI_p90": float(np.nanpercentile(ndvi, 90)),
-                
-                "NBR_p10": float(np.nanpercentile(nbr, 10)),
-                "NBR_p50": float(np.nanpercentile(nbr, 50)),
-                "NBR_p90": float(np.nanpercentile(nbr, 90)),
-                
-                "NDMI_p10": float(np.nanpercentile(ndmi, 10)),
-                "NDMI_p50": float(np.nanpercentile(ndmi, 50)),
-                "NDMI_p90": float(np.nanpercentile(ndmi, 90)),
+                # Core indices for forest health
+                "NDVI_mean": float(np.nanmean(ndvi)),  # Vegetation greenness
+                "NBR_mean": float(np.nanmean(nbr)),    # Bark beetle indicator
+                "NDMI_mean": float(np.nanmean(ndmi)),  # Moisture stress
             }
             
             return stats, None
@@ -129,76 +92,61 @@ def process_tiff_efficient(filepath):
         return None, f"Error: {str(e)}"
 
 
-def assign_composite_period(date, days=10):
-    """Assign image to composite period"""
-    from datetime import timedelta
-    year = date.year
-    day_of_year = date.timetuple().tm_yday
-    period = (day_of_year - 1) // days
-    
-    # Create period start date
-    period_start = datetime(year, 1, 1) + timedelta(days=period * days)
-    return period_start
-
+# ============================================================================
+# COMPOSITING - ok this is sth I found out recently => could be useful since we have many cloudy images
+# the idea is to combine multiple images from a short period (rn is 10 days) into one "cleaner" image
+# this reduces noise and fills gaps from clouds - gives us a better chance to see real changes on the ground
+# ============================================================================
 
 def create_composites(df, days=10):
-    """Create temporal composites from all images"""
-    print(f"CREATING {days}-DAY COMPOSITES")
-    
-    # Assign composite periods
-    df['composite_period'] = df['date'].apply(
-        lambda x: assign_composite_period(x, days)
+    """
+    10-day composite = Combine multiple images from a 10-day period into one "cleaner" image
+    We aggregate statistics over these periods: Take mean/median → x% valid pixels over 10 days
+    """    
+    # Create time-based grouping key (rounds down to nearest 10-day period)
+    df['period_key'] = (
+        (df['date'] - pd.Timestamp('2020-01-01')).dt.days // days
     )
     
-    print(f"\nImages: {len(df)}")
-    print(f"Periods: {df['composite_period'].nunique()}")
+    print(f"Images: {len(df)}")
+    print(f"Periods: {df['period_key'].nunique()}")
     
-    # Group by period and aggregate
-    composites = df.groupby('composite_period').agg({
-        'NDVI_mean': 'mean',
-        'NBR_mean': 'mean',
-        'NDMI_mean': 'mean',
-        'NDVI_std': 'mean',
-        'NBR_std': 'mean',
-        'NDMI_std': 'mean',
-        'NDVI_p50': 'median',
-        'NBR_p50': 'median',
-        'NDMI_p50': 'median',
-        'valid_fraction': 'mean',
-        'date': 'first',
-        'filename': 'count'
-    }).reset_index()
+    # Group by period and take mean of all images in that period
+    composites = df.groupby('period_key').agg({
+        'NDVI_mean': 'mean',      # Average NDVI across all images in period
+        'NBR_mean': 'mean',       # Average NBR
+        'NDMI_mean': 'mean',      # Average NDMI
+        'valid_fraction': 'mean', # Average data quality
+        'date': 'first',          # Use first date in period
+        'filename': 'count'       # Count how many images per composite
+    }).reset_index(drop=True)
     
     # Rename count column
     composites.rename(columns={'filename': 'n_images'}, inplace=True)
     
-    # Add temporal features
-    composites['year'] = composites['date'].dt.year
-    composites['month'] = composites['date'].dt.month
+    # Add day of year for ML features later
     composites['day_of_year'] = composites['date'].dt.dayofyear
     
-    print(f"\nComposites created: {len(composites)}")
+    print(f"Composites created: {len(composites)}")
     print(f"Avg images per composite: {composites['n_images'].mean():.1f}")
     
     return composites.sort_values('date').reset_index(drop=True)
 
-
 def process_directory_parallel(input_dir, max_workers=2):
-    """Process all TIFFs with parallel processing"""
+    
     tiff_files = list(Path(input_dir).rglob("*.tif"))
     tiff_files = [f for f in tiff_files if not f.name.startswith('.')]
     
-    print(f"PREPROCESSING: {len(tiff_files)} files found")
-    print(f"Using {max_workers} workers")
+    print(f"\nPREPROCESSING: {len(tiff_files)} files found")
     
     records = []
     skipped = []
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_tiff_efficient, f): f 
-                  for f in tiff_files}
+        futures = {executor.submit(process_tiff, f): f for f in tiff_files}
         
         for i, future in enumerate(as_completed(futures), 1):
+            # Progress update every 10 files
             if i % 10 == 0 or i == len(tiff_files):
                 print(f"Processed: {i}/{len(tiff_files)} ({i/len(tiff_files)*100:.1f}%)")
             
@@ -218,13 +166,9 @@ def process_directory_parallel(input_dir, max_workers=2):
     
     df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
     
-    # Summary
-    print(f"RESULTS")
+    # Print summary
     print(f"✓ Processed: {len(records)}")
-    print(f"✗ Skipped: {len(skipped)}")
-    
-    print(f"\nDate range: {df['date'].min()} → {df['date'].max()}")
-    print(f"Total span: {(df['date'].max() - df['date'].min()).days} days")
+    print(f"✗ Skipped: {len(skipped)} (too cloudy or errors)")
     
     print(f"\nPer year:")
     for year, count in df.groupby('year').size().items():
@@ -239,23 +183,21 @@ def process_directory_parallel(input_dir, max_workers=2):
     print(f"   Avg valid: {df['valid_fraction'].mean()*100:.1f}%")
     print(f"   Min valid: {df['valid_fraction'].min()*100:.1f}%")
     
+    # Show some skipped files for debugging
     if skipped:
-        print(f"\n Skipped files (first 10):")
-        for name, reason in skipped[:10]:
-            print(f"   • {name}: {reason}")
+        print(f"\nSkipped files (first 10):")
+        for filename, error in skipped[:10]:
+            print(f"   • {filename}: {error}")
     
     return df
 
 
 def process_directory_serial(input_dir):
-    """Process all TIFFs serially (safer for low memory)"""
+    
     tiff_files = list(Path(input_dir).rglob("*.tif"))
     tiff_files = [f for f in tiff_files if not f.name.startswith('.')]
     
-    print(f"\n{'='*70}")
-    print(f"PREPROCESSING: {len(tiff_files)} files found")
-    print(f"Serial processing (safer for memory)")
-    print(f"{'='*70}")
+    print(f"\nPREPROCESSING: {len(tiff_files)} files found")
     
     records = []
     skipped = []
@@ -264,7 +206,7 @@ def process_directory_serial(input_dir):
         if i % 10 == 0 or i == len(tiff_files):
             print(f"Processing {i}/{len(tiff_files)} ({i/len(tiff_files)*100:.1f}%)")
         
-        stats, error = process_tiff_efficient(filepath)
+        stats, error = process_tiff(filepath)
         
         if stats:
             records.append(stats)
@@ -277,16 +219,18 @@ def process_directory_serial(input_dir):
     
     df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
     
-    # Same summary as parallel version
-    print(f"RESULTS")
-    print(f" Processed: {len(records)}")
-    print(f" Skipped: {len(skipped)}")
+    print(f"✓ Processed: {len(records)}")
+    print(f"✗ Skipped: {len(skipped)}")
     
     return df
 
+
+# ============================================================================
+# MAIN EXECUTION
 # ============================================================================
 
 if __name__ == "__main__":
+    
     # Verify directory exists
     if not DRIVE_INPUT_DIR.exists():
         print(f"\n ERROR: Directory not found!")
@@ -295,23 +239,22 @@ if __name__ == "__main__":
         if MY_DRIVE.exists():
             for item in sorted(MY_DRIVE.iterdir()):
                 if item.is_dir():
-                    print(f"   📁 {item.name}")
-        print("\n Update the folder name in CONFIG section if needed")
+                    print(f"    {item.name}")
         exit(1)
     
-    # Create output directory
     OUTPUT_DIR.mkdir(exist_ok=True)
     
-    # Process files
+    # Process all TIFF files
     if USE_PARALLEL:
         df = process_directory_parallel(DRIVE_INPUT_DIR, max_workers=MAX_WORKERS)
     else:
         df = process_directory_serial(DRIVE_INPUT_DIR)
     
     if df is not None:
-        # Save all images
-        df.to_csv(OUTPUT_DIR / "01_all_images.csv", index=False)
-        print(f"\n Saved all images: output/01_all_images.csv ({len(df)} images)")
+        # Save raw images
+        raw_csv = OUTPUT_DIR / "01_all_images.csv"
+        df.to_csv(raw_csv, index=False)
+        print(f"\n✓ Saved all images: {raw_csv} ({len(df)} images)")
         
         # Create and save composites
         composites = create_composites(df, days=COMPOSITE_DAYS)
@@ -319,10 +262,13 @@ if __name__ == "__main__":
         composites.to_csv(OUTPUT_CSV, index=False)
         composites.to_pickle(OUTPUT_PKL)
         
-        print(f"Raw images:  output/01_all_images.csv ({len(df)} images)")
+        print("OUTPUT FILES")
+        print(f"Raw images:  {raw_csv} ({len(df)} images)")
         print(f"Composites:  {OUTPUT_CSV} ({len(composites)} composites)")
         print(f"Pickle:      {OUTPUT_PKL}")
         
         print(f"\n Composite Preview:")
-        print(composites[['date', 'year', 'month', 'n_images', 'NDVI_mean', 'NBR_mean', 'NDMI_mean']].head(15))
+        print(composites[['date', 'year', 'month', 'n_images', 
+                         'NDVI_mean', 'NBR_mean', 'NDMI_mean']].head(15))
         
+        print(" PREPROCESSING COMPLETE")

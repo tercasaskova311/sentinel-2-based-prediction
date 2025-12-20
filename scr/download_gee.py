@@ -1,33 +1,18 @@
-#!/usr/bin/env python3
-"""
-Resume Sentinel-2 Download from Specific Date
-Modified to start from 2022-05-19 onwards
-"""
+#sentinel 2 download from GEE to google drive: ALL available Sentinel-2 images that meet the criteria... - usually 2-5 days gaps...
+#downloads images from 2022-2024 for area of interest defined in sumava_aoi_clean.geojson
+#downloads only bands B8 (NIR), NDVI, NBR, NDMI at 20m resolution with max 50% cloud cover
 
 import ee
 import geopandas as gpd
 import os
 from datetime import datetime, timedelta
 
-# ========================================
-# CONFIGURATION
-# ========================================
 AOI_PATH = "data/boundaries/sumava_aoi_clean.geojson"
-OUTPUT_DIR = "data/historical"
-
-# Resume configuration
 RESUME_FROM_DATE = "2022-05-19"  
 START_YEAR = 2022
 END_YEAR = 2024
-
-MAX_CLOUD = 50  
-RESOLUTION = 20
-
-# ========================================
-# INITIALIZATION
-# ========================================
-
-print("RESUMING SENTINEL-2 DOWNLOAD FROM 2022-05-19")
+MAX_CLOUD = 50  #50% cloud cover = later I will filter more strictly during preprocessing 
+RESOLUTION = 20  # meters
 
 ee.Initialize(project='deforestration-detection')
 
@@ -35,12 +20,9 @@ aoi_gdf = gpd.read_file(AOI_PATH)
 aoi_ee = ee.Geometry.Polygon(
     aoi_gdf.geometry.iloc[0].__geo_interface__["coordinates"]
 )
-print("AOI loaded")
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def process_image(image):
-    """Add spectral indices"""
+    #we only need NDVI - greeness index, NBR - burn ratio index, NDMI - moisture index ...
     ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
     nbr = image.normalizedDifference(['B8', 'B12']).rename('NBR')
     ndmi = image.normalizedDifference(['B8', 'B11']).rename('NDMI')
@@ -48,8 +30,7 @@ def process_image(image):
 
 
 def export_image(image, date_str):
-    """Export only indices + one reference band"""
-    export_bands = image.select(['B8', 'NDVI', 'NBR', 'NDMI']).toFloat()
+    export_bands = image.select(['B8', 'NDVI', 'NBR', 'NDMI']).toFloat() 
     
     task = ee.batch.Export.image.toDrive(
         image=export_bands,
@@ -58,7 +39,7 @@ def export_image(image, date_str):
         fileNamePrefix=f"sumava_{date_str}",
         scale=RESOLUTION,
         region=aoi_ee,
-        crs='EPSG:32633',
+        crs='EPSG:32633', # UTM zone 33N
         fileFormat='GeoTIFF',
         maxPixels=1e9
     )
@@ -67,7 +48,6 @@ def export_image(image, date_str):
 
 
 def get_existing_tasks():
-    """Get list of already queued/completed tasks to avoid duplicates"""
     try:
         tasks = ee.batch.Task.list()
         existing_dates = set()
@@ -75,7 +55,6 @@ def get_existing_tasks():
         for task in tasks:
             desc = task.status().get('description', '')
             if desc.startswith('sumava_'):
-                # Extract date from description
                 date_str = desc.replace('sumava_', '')
                 existing_dates.add(date_str)
         
@@ -86,22 +65,13 @@ def get_existing_tasks():
 
 
 def download_year(year, start_date_filter=None):
-    """
-    Download images for a year, optionally filtering by start date
     
-    Args:
-        year: Year to download
-        start_date_filter: Only download images after this date (YYYY-MM-DD)
-    """
-    
-    print(f"\nYEAR {year}")
-    print("=" * 70)
-    
+    print(f"\nYEAR {year}")    
     # Determine date range
     if start_date_filter and year == int(start_date_filter.split('-')[0]):
         # For the resume year, start from resume date
         start_date = start_date_filter
-        print(f"📍 Resuming from: {start_date}")
+        print(f" Resuming from: {start_date}")
     else:
         start_date = f"{year}-04-01"
     
@@ -141,7 +111,7 @@ def download_year(year, start_date_filter=None):
         if date_str in existing_dates:
             skipped += 1
             if skipped <= 3:  # Only show first few
-                print(f"  ⏭️  {date_str} (already queued)")
+                print(f"{date_str} (already queued)")
             continue
         
         # Queue new export
