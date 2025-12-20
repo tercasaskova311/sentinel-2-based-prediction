@@ -51,18 +51,24 @@ def process_tiff_efficient(filepath):
                 resampling=rasterio.enums.Resampling.average
             ).astype(np.float32)
             
-            if arr.shape[0] != 8:
-                return None, f"Expected 8 bands, got {arr.shape[0]}"
+            # Handle 4-band images (B8, NDVI, NBR, NDMI)
+            if arr.shape[0] == 4:
+                b8, ndvi, nbr, ndmi = arr
+                # Skip cloud masking since we don't have SCL
+                good = np.ones_like(ndvi, dtype=bool)  # Assume all pixels are good
+                
+            # Handle 8-band images (B4, B8, B11, B12, SCL, NDVI, NBR, NDMI)
+            elif arr.shape[0] == 8:
+                b4, b8, b11, b12, scl, ndvi, nbr, ndmi = arr
+                # Mask bad pixels using SCL
+                good = (
+                    (scl != 0) & (scl != 1) & (scl != 3) &
+                    (scl != 8) & (scl != 9) & (scl != 10) & (scl != 11)
+                )
+            else:
+                return None, f"Expected 4 or 8 bands, got {arr.shape[0]}"
             
-            # Extract bands: B4, B8, B11, B12, SCL, NDVI, NBR, NDMI
-            b4, b8, b11, b12, scl, ndvi, nbr, ndmi = arr
-            
-            # Mask bad pixels using SCL
-            good = (
-                (scl != 0) & (scl != 1) & (scl != 3) &
-                (scl != 8) & (scl != 9) & (scl != 10) & (scl != 11)
-            )
-            
+            # Apply mask
             ndvi[~good] = np.nan
             nbr[~good] = np.nan
             ndmi[~good] = np.nan
@@ -84,7 +90,7 @@ def process_tiff_efficient(filepath):
             if date is None:
                 return None, "No date in filename"
             
-            # Compute stats (faster on downsampled data)
+            # Compute stats (same as before)
             stats = {
                 "date": date,
                 "year": date.year,
