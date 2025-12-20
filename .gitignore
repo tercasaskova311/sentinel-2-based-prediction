@@ -1,13 +1,4 @@
 data/
-
-
 __pycache__/
-*.py[codz]
-*$py.class
-var/
-
-# Environments
-.env
-.venv
-env/
+.DS_Store
 

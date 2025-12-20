@@ -8,3 +8,4 @@ Build an automated system to detect logging/deforestation events in Šumava Nati
 
 
 
+

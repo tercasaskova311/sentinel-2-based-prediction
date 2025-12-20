@@ -1,6 +1,7 @@
 #process it thought google drive app... GEE => drive export => local drive sync
 #in preprocessing we will: extract date, mask clouds, calculate indices averages, create composites every 10 days
 #plus parallel processing option...
+#spatial detection = pixel-level composites - median of valid pixels over 10-day windows
 
 import re
 from pathlib import Path
@@ -98,39 +99,32 @@ def process_tiff(filepath):
 # this reduces noise and fills gaps from clouds - gives us a better chance to see real changes on the ground
 # ============================================================================
 
-def create_composites(df, days=10):
-    """
-    10-day composite = Combine multiple images from a 10-day period into one "cleaner" image
-    We aggregate statistics over these periods: Take mean/median → x% valid pixels over 10 days
-    """    
-    # Create time-based grouping key (rounds down to nearest 10-day period)
-    df['period_key'] = (
-        (df['date'] - pd.Timestamp('2020-01-01')).dt.days // days
-    )
+def create_pixel_composite(tiff_files, output_path):
+#Create pixel-level composite from multiple TIFF files
+#For each pixel: take median of valid (non-cloud) values
+
+    arrays = []
+    for tiff in tiff_files:
+        with rasterio.open(tiff) as src:
+            arr = src.read().astype(np.float32)
+            # Mask clouds (invalid values)
+            arr[(arr < -1) | (arr > 1)] = np.nan
+            arrays.append(arr)
     
-    print(f"Images: {len(df)}")
-    print(f"Periods: {df['period_key'].nunique()}")
+    # Stack along new axis
+    stacked = np.stack(arrays, axis=0)  # Shape: (n_images, n_bands, height, width)
     
-    # Group by period and take mean of all images in that period
-    composites = df.groupby('period_key').agg({
-        'NDVI_mean': 'mean',      # Average NDVI across all images in period
-        'NBR_mean': 'mean',       # Average NBR
-        'NDMI_mean': 'mean',      # Average NDMI
-        'valid_fraction': 'mean', # Average data quality
-        'date': 'first',          # Use first date in period
-        'filename': 'count'       # Count how many images per composite
-    }).reset_index(drop=True)
+    # Take mean across images for each pixel
+    composite = np.nanmean(stacked, axis=0)  # Shape: (n_bands, height, width)
     
-    # Rename count column
-    composites.rename(columns={'filename': 'n_images'}, inplace=True)
+    # Save composite image
+    with rasterio.open(tiff_files[0]) as src:
+        profile = src.profile
+        with rasterio.open(output_path, 'w', **profile) as dst:
+            dst.write(composite)
     
-    # Add day of year for ML features later
-    composites['day_of_year'] = composites['date'].dt.dayofyear
-    
-    print(f"Composites created: {len(composites)}")
-    print(f"Avg images per composite: {composites['n_images'].mean():.1f}")
-    
-    return composites.sort_values('date').reset_index(drop=True)
+    return output_path
+
 
 def process_directory_parallel(input_dir, max_workers=2):
     
@@ -257,7 +251,7 @@ if __name__ == "__main__":
         print(f"\n✓ Saved all images: {raw_csv} ({len(df)} images)")
         
         # Create and save composites
-        composites = create_composites(df, days=COMPOSITE_DAYS)
+        composites = create_pixel_composite(df, days=COMPOSITE_DAYS)
         
         composites.to_csv(OUTPUT_CSV, index=False)
         composites.to_pickle(OUTPUT_PKL)
