@@ -16,7 +16,7 @@ AOI_PATH = "data/boundaries/sumava_aoi_clean.geojson"
 OUTPUT_DIR = "data/historical"
 
 # Resume configuration
-RESUME_FROM_DATE = "2022-05-19"  # Last downloaded was 2022-05-18
+RESUME_FROM_DATE = "2022-05-19"  
 START_YEAR = 2022
 END_YEAR = 2024
 
@@ -27,24 +27,17 @@ RESOLUTION = 20
 # INITIALIZATION
 # ========================================
 
-print("\n" + "=" * 70)
 print("RESUMING SENTINEL-2 DOWNLOAD FROM 2022-05-19")
-print("=" * 70)
 
 ee.Initialize(project='deforestration-detection')
-print("✓ Earth Engine initialized")
 
 aoi_gdf = gpd.read_file(AOI_PATH)
 aoi_ee = ee.Geometry.Polygon(
     aoi_gdf.geometry.iloc[0].__geo_interface__["coordinates"]
 )
-print("✓ AOI loaded")
+print("AOI loaded")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ========================================
-# PROCESSING FUNCTIONS
-# ========================================
 
 def process_image(image):
     """Add spectral indices"""
@@ -88,7 +81,7 @@ def get_existing_tasks():
         
         return existing_dates
     except Exception as e:
-        print(f"⚠️  Could not check existing tasks: {e}")
+        print(f" Could not check existing tasks: {e}")
         return set()
 
 
@@ -127,7 +120,7 @@ def download_year(year, start_date_filter=None):
     print(f"Available images: {n}")
     
     if n == 0:
-        print("⏭️  No images found")
+        print(" No images found")
         return []
     
     # Get existing tasks to avoid duplicates
@@ -154,7 +147,7 @@ def download_year(year, start_date_filter=None):
         # Queue new export
         task = export_image(img, date_str)
         tasks.append((date_str, task))
-        print(f"  ✅ {date_str} (queued)")
+        print(f" {date_str} (queued)")
         
         if (len(tasks) + skipped) % 10 == 0:
             print(f"     Progress: {len(tasks) + skipped}/{n}")
@@ -172,7 +165,6 @@ print(f"Resuming from: {RESUME_FROM_DATE}")
 print(f"Years to process: {START_YEAR}-{END_YEAR}")
 print(f"Max cloud cover: {MAX_CLOUD}%")
 print(f"Resolution: {RESOLUTION}m")
-print("=" * 70)
 
 all_tasks = []
 total_skipped = 0
@@ -188,11 +180,10 @@ for year in range(START_YEAR, END_YEAR + 1):
 print(f"Total new exports queued: {len(all_tasks)}")
 
 if len(all_tasks) > 0:
-    print("\n📋 First 10 queued exports:")
     for i, (date_str, task) in enumerate(all_tasks[:10]):
         print(f"  {i+1}. {date_str}")
     
     if len(all_tasks) > 10:
         print(f"  ... and {len(all_tasks) - 10} more")
 
-print(" you can check the downloading on: https://code.earthengine.google.com/tasks")
+# you can check the downloading on: https://code.earthengine.google.com/tasks")
