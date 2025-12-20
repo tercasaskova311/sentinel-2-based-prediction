@@ -143,9 +143,7 @@ def assign_composite_period(date, days=10):
 
 def create_composites(df, days=10):
     """Create temporal composites from all images"""
-    print(f"\n{'='*70}")
     print(f"CREATING {days}-DAY COMPOSITES")
-    print(f"{'='*70}")
     
     # Assign composite periods
     df['composite_period'] = df['date'].apply(
@@ -190,10 +188,8 @@ def process_directory_parallel(input_dir, max_workers=2):
     tiff_files = list(Path(input_dir).rglob("*.tif"))
     tiff_files = [f for f in tiff_files if not f.name.startswith('.')]
     
-    print(f"\n{'='*70}")
     print(f"PREPROCESSING: {len(tiff_files)} files found")
     print(f"Using {max_workers} workers")
-    print(f"{'='*70}")
     
     records = []
     skipped = []
@@ -223,9 +219,7 @@ def process_directory_parallel(input_dir, max_workers=2):
     df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
     
     # Summary
-    print(f"\n{'='*70}")
     print(f"RESULTS")
-    print(f"{'='*70}")
     print(f"✓ Processed: {len(records)}")
     print(f"✗ Skipped: {len(skipped)}")
     
@@ -297,7 +291,7 @@ if __name__ == "__main__":
     if not DRIVE_INPUT_DIR.exists():
         print(f"\n ERROR: Directory not found!")
         print(f"   Looking for: {DRIVE_INPUT_DIR}")
-        print(f"\n📁 Contents of My Drive:")
+        print(f"\n Contents of My Drive:")
         if MY_DRIVE.exists():
             for item in sorted(MY_DRIVE.iterdir()):
                 if item.is_dir():
