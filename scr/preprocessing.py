@@ -1,15 +1,15 @@
 #process it thought google drive app... GEE => drive export => local drive sync
-#in preprocessing we will: extract date, mask clouds, calculate indices averages, create composites every 10 days
-#plus parallel processing option...
-#spatial detection = pixel-level composites - median of valid pixels over 10-day windows
+#preprocessing: extract date, mask clouds, calculate indices averages, create composites every 10 days
 
 import re
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import rasterio
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+import time
 
 GDRIVE_ROOT = Path.home() / "Library/CloudStorage"
 gdrive_folders = list(GDRIVE_ROOT.glob("GoogleDrive-*"))
@@ -21,16 +21,15 @@ else:
     raise FileNotFoundError("Did not find Google Drive folder")
 
 OUTPUT_DIR = Path("output")
-OUTPUT_COMPOSITES_DIR = OUTPUT_DIR / "composites"  # ← NEW: Directory for composite TIFFs
+OUTPUT_COMPOSITES_DIR = OUTPUT_DIR / "composites"
 OUTPUT_CSV = OUTPUT_DIR / "01_preprocessed_timeseries.csv"
 OUTPUT_PKL = OUTPUT_DIR / "01_preprocessed_timeseries.pkl"
 
-MIN_VALID_FRACTION = 0.30  # Skip images with <30% valid pixels (too cloudy)
-COMPOSITE_DAYS = 10         # Combine images every 10 days to reduce cloud noise
-USE_PARALLEL = True         # Use parallel processing (faster but more memory)
-MAX_WORKERS = 2             # Reduce if crashes
+MIN_VALID_FRACTION = 0.30
+COMPOSITE_DAYS = 10
+USE_PARALLEL = True
+MAX_WORKERS = max(1, multiprocessing.cpu_count() - 1)  
 
-# ============================================================================
 def extract_date(filename): 
     match = re.search(r"(\d{4})[-_]?(\d{2})[-_]?(\d{2})", str(filename))
     if match:
@@ -40,53 +39,51 @@ def extract_date(filename):
             return None
     return None
 
-def process_tiff(filepath):
-    """
-    Process one TIFF file means:
-    1. Load 4 bands (B8, NDVI, NBR, NDMI) from GEE export
-    2. Mask invalid values (clouds, out-of-range) = check if enough valid pixels (>30%)
-    3. Calculate mean indices for metadata
-    """
+
+def process_tiff_fast(filepath):
     
     try:
         with rasterio.open(filepath) as src:
-            arr = src.read().astype(np.float32)
+            # Quick metadata check first (don't read full array yet)
+            if src.count != 4:
+                return None, f"Expected 4 bands, got {src.count}"
             
-            if arr.shape[0] != 4:
-                return None, f"Expected 4 bands, got {arr.shape[0]}"
+            # Read all bands at once (faster than separate reads)
+            arr = src.read(out_dtype=np.float32)
             
             b8, ndvi, nbr, ndmi = arr
             
-            #APPLY MASKS - important => cloud masking on given indices = we mask by valid index values
-            ndvi[(ndvi < -1) | (ndvi > 1)] = np.nan
-            nbr[(nbr < -1) | (nbr > 1)] = np.nan
-            ndmi[(ndmi < -1) | (ndmi > 1)] = np.nan
+            # Vectorized masking - all indices at once
+            mask = ((ndvi < -1) | (ndvi > 1) | 
+                   (nbr < -1) | (nbr > 1) | 
+                   (ndmi < -1) | (ndmi > 1))
             
-            # Check validity - need at least 30% valid pixels
-            valid_mask = np.isfinite(ndvi)
-            valid_fraction = valid_mask.sum() / ndvi.size
+            ndvi[mask] = np.nan
+            nbr[mask] = np.nan
+            ndmi[mask] = np.nan
+            
+            # Quick validity check
+            valid_fraction = np.isfinite(ndvi).sum() / ndvi.size
             
             if valid_fraction < MIN_VALID_FRACTION:
                 return None, f"Too few valid pixels: {valid_fraction:.1%}"
             
-            # Get date from filename
+            # Extract date
             date = extract_date(filepath.name)
             if date is None:
                 return None, "No date in filename"
             
-            # Compute basic statistics for metadata
+            # Minimal statistics (we'll recalculate from composites anyway)
             stats = {
                 "date": date,
                 "year": date.year,
                 "month": date.month,
-                "filepath": str(filepath),  #  Store filepath for later compositing
+                "filepath": str(filepath),
                 "filename": filepath.name,
                 "valid_fraction": float(valid_fraction),
-                
-                # Core indices for forest health (for metadata only)
-                "NDVI_mean": float(np.nanmean(ndvi)),  # Vegetation greenness
-                "NBR_mean": float(np.nanmean(nbr)),    # Bark beetle indicator
-                "NDMI_mean": float(np.nanmean(ndmi)),  # Moisture stress
+                "NDVI_mean": float(np.nanmean(ndvi)),
+                "NBR_mean": float(np.nanmean(nbr)),
+                "NDMI_mean": float(np.nanmean(ndmi)),
             }
             
             return stats, None
@@ -94,70 +91,65 @@ def process_tiff(filepath):
     except Exception as e:
         return None, f"Error: {str(e)}"
 
-# PIXEL-LEVEL COMPOSITING - I have adjusted thelogic here - I think this could be a smart way to do it because:
-# - we take median of valid pixels over multiple images in the period of 10 days =>  which allow us to work with images eventought they are cloudy
-# - we calculate valid fraction of the composite itself => so we know how much of the composite is valid data
-# - we calculate mean indices from the composite itself => more robust statistics
-# - this approach should give us better spatial detection capability
-# - also I think later for labeling: we can use these composites directly to see spatial patterns of deforestation
+#this is important - soemthing I have changed - we can use composides instead of each imaginery
+#composite = median of values of bands in the 10 days window, basically this avoid skipping too many images thanks to cloud masking becuase we take median form all images in given window and create a "new image - composite"
+#i think we can ealy use this later for the labeling - simply use composites and performe spatial detection on them
+#what is also importatn here taht we do pixel based compositing - meaning for each pixel we take median of all values accross images in given window - this is super important for later detection step
 
-def create_pixel_composite(tiff_files, output_path):
-#pixel-level composite from multiple TIFF files => take MEDIAN of valid (non-cloud) values
+
+def create_pixel_composite_fast(tiff_files, output_path):
     
-    arrays = []
-    valid_files = []
-    
-    for tiff in tiff_files:
-        try:
-            with rasterio.open(tiff) as src:
-                arr = src.read().astype(np.float32)
-                
-                # Mask invalid values (clouds, out-of-range)
-                for band_idx in range(arr.shape[0]):
-                    band = arr[band_idx]
-                    band[(band < -1) | (band > 1)] = np.nan
-                
-                arrays.append(arr)
-                valid_files.append(tiff)
-                
-        except Exception as e:
-            print(f" Skipping {tiff.name}: {e}")
-    
-    if not arrays:
+    if not tiff_files:
         return None
     
-    # Stack along new axis: (n_images, n_bands, height, width)
-    stacked = np.stack(arrays, axis=0)
+#Pre-allocate arrays
+    first_file = tiff_files[0]
+    with rasterio.open(first_file) as src:
+        shape = src.shape
+        n_bands = src.count
+        profile = src.profile.copy()
     
-    # Take MEDIAN across images for each pixel (more robust than mean)
-    composite = np.nanmedian(stacked, axis=0)  # Shape: (n_bands, height, width)
+    # Stack arrays efficiently
+    arrays = np.zeros((len(tiff_files), n_bands, shape[0], shape[1]), dtype=np.float32)
+    arrays[:] = np.nan  # Initialize with NaN
     
-    # Calculate valid fraction of composite
+    valid_count = 0
+    
+    for i, tiff in enumerate(tiff_files):
+        try:
+            with rasterio.open(tiff) as src:
+                arr = src.read(out_dtype=np.float32)
+                
+                # Vectorized masking
+                mask = ((arr < -1) | (arr > 1))
+                arr[mask] = np.nan
+                
+                arrays[i] = arr
+                valid_count += 1
+                
+        except Exception as e:
+            print(f"Skipping {tiff.name}: {e}")
+            continue
+    
+    if valid_count == 0:
+        return None
+    
+    #nanmedian with efficient axis
+    with np.errstate(invalid='ignore'):  # Suppress warnings
+        composite = np.nanmedian(arrays[:valid_count], axis=0)
+    
+    # Calculate valid fraction
     valid_fraction = np.isfinite(composite[1]).sum() / composite[1].size
     
-    # Save composite image
-    with rasterio.open(valid_files[0]) as src:
-        profile = src.profile.copy()
-        profile.update(dtype=rasterio.float32, compress='lzw')
-        
-        with rasterio.open(output_path, 'w', **profile) as dst:
-            dst.write(composite.astype(np.float32))
+    profile.update(dtype=rasterio.float32, compress='lzw')
+    
+    with rasterio.open(output_path, 'w', **profile) as dst:
+        dst.write(composite)
     
     return output_path, valid_fraction
 
 
-def create_composites_from_images(df, output_dir, days=10):
-    """
-    Create pixel-level composites from raw images
-    
-    Args:
-        df: DataFrame with processed image metadata (must have 'filepath' and 'date' columns)
-        output_dir: Directory to save composite TIFFs
-        days: Number of days per composite period
-    
-    Returns:
-        DataFrame with composite metadata
-    """
+def create_composites_from_images_fast(df, output_dir, days=10):
     
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -171,77 +163,112 @@ def create_composites_from_images(df, output_dir, days=10):
     print(f"Images: {len(df)}")
     print(f"Periods: {df['period_key'].nunique()}")
     
-    composite_metadata = []
-    
+    composite_jobs = []
     for period_key, period_df in df.groupby('period_key'):
-        # Get files for this period
         tiff_files = [Path(fp) for fp in period_df['filepath']]
         first_date = period_df['date'].min()
-        
-        # Create composite filename
         composite_name = f"composite_{first_date.strftime('%Y-%m-%d')}.tif"
         output_path = output_dir / composite_name
         
-        print(f"\n  Creating: {composite_name}")
-        print(f"    From {len(tiff_files)} images: {first_date.strftime('%Y-%m-%d')} to {period_df['date'].max().strftime('%Y-%m-%d')}")
-        
-        # Create pixel-level composite
-        result = create_pixel_composite(tiff_files, output_path)
+        composite_jobs.append({
+            'period_key': period_key,
+            'tiff_files': tiff_files,
+            'output_path': output_path,
+            'first_date': first_date,
+            'last_date': period_df['date'].max(),
+        })
+    
+    print(f"\n Processing {len(composite_jobs)} composites in parallel...")
+    
+    # Process composites in parallel
+    composite_metadata = []
+    start_time = time.time()
+    
+    def process_composite_job(job):
+        """Helper function for parallel processing"""
+        result = create_pixel_composite_fast(job['tiff_files'], job['output_path'])
         
         if result is None:
-            print(f"Failed to create composite")
-            continue
+            return None
         
         composite_path, valid_fraction = result
         
-        # Calculate mean indices from composite
+        # Read composite to calculate statistics
         with rasterio.open(composite_path) as src:
             composite_arr = src.read()
-            ndvi = composite_arr[1]  # NDVI is band 2
-            nbr = composite_arr[2]   # NBR is band 3
-            ndmi = composite_arr[3]  # NDMI is band 4
+            ndvi = composite_arr[1]
+            nbr = composite_arr[2]
+            ndmi = composite_arr[3]
         
-        # Store metadata
-        composite_metadata.append({
-            'date': first_date,
-            'year': first_date.year,
-            'month': first_date.month,
-            'day_of_year': first_date.timetuple().tm_yday,
+        return {
+            'date': job['first_date'],
+            'year': job['first_date'].year,
+            'month': job['first_date'].month,
+            'day_of_year': job['first_date'].timetuple().tm_yday,
             'composite_path': str(composite_path),
-            'n_images': len(tiff_files),
+            'n_images': len(job['tiff_files']),
             'valid_fraction': valid_fraction,
             'NDVI_mean': float(np.nanmean(ndvi)),
             'NBR_mean': float(np.nanmean(nbr)),
             'NDMI_mean': float(np.nanmean(ndmi)),
-        })
+        }
+    
+    #Parallel composite creation
+    with ProcessPoolExecutor(max_workers=min(MAX_WORKERS, len(composite_jobs))) as executor:
+        futures = {executor.submit(process_composite_job, job): job for job in composite_jobs}
         
-        print(f"    ✓ Saved: {output_path}")
-        print(f"    ✓ Valid pixels: {valid_fraction*100:.1f}%")
+        for i, future in enumerate(as_completed(futures), 1):
+            job = futures[future]
+            
+            try:
+                result = future.result()
+                if result:
+                    composite_metadata.append(result)
+                    
+                    # Progress update
+                    elapsed = time.time() - start_time
+                    rate = i / elapsed if elapsed > 0 else 0
+                    eta = (len(composite_jobs) - i) / rate if rate > 0 else 0
+                    
+                    print(f"  [{i}/{len(composite_jobs)}] {job['output_path'].name} "
+                          f"({len(job['tiff_files'])} imgs) | "
+                          f"ETA: {eta/60:.1f}min", end='\r')
+                else:
+                    print(f"\n Failed: {job['output_path'].name}")
+                    
+            except Exception as e:
+                print(f"\n Error: {job['output_path'].name}: {e}")
+    
+    print()  
     
     composites_df = pd.DataFrame(composite_metadata).sort_values('date').reset_index(drop=True)
     
-    print(f"✓ Created {len(composites_df)} pixel-level composites")
-    print(f"✓ Saved to: {output_dir}")    
+    elapsed = time.time() - start_time
+    print(f"✓ Created {len(composites_df)} composites in {elapsed/60:.1f} minutes")
+    print(f"✓ Average: {elapsed/len(composites_df):.1f}s per composite")
+    
     return composites_df
 
 
-def process_directory_parallel(input_dir, max_workers=2):
+def process_directory_parallel_fast(input_dir, max_workers):
     
     tiff_files = list(Path(input_dir).rglob("*.tif"))
     tiff_files = [f for f in tiff_files if not f.name.startswith('.')]
-    print(f"Found: {len(tiff_files)} TIFF files")
+    
+    print(f"STEP 1: PROCESSING RAW IMAGES")
+    print(f"Files: {len(tiff_files)}")
+    print(f"Workers: {max_workers}")
     
     records = []
     skipped = []
+    start_time = time.time()
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_tiff, f): f for f in tiff_files}
+        futures = {executor.submit(process_tiff_fast, f): f for f in tiff_files}
         
         for i, future in enumerate(as_completed(futures), 1):
-            if i % 10 == 0 or i == len(tiff_files):
-                print(f"  Processed: {i}/{len(tiff_files)} ({i/len(tiff_files)*100:.1f}%)")
-            
             filepath = futures[future]
+            
             try:
                 stats, error = future.result()
                 if stats:
@@ -250,6 +277,16 @@ def process_directory_parallel(input_dir, max_workers=2):
                     skipped.append((filepath.name, error))
             except Exception as e:
                 skipped.append((filepath.name, str(e)))
+            
+            # Better progress tracking
+            if i % 10 == 0 or i == len(tiff_files):
+                elapsed = time.time() - start_time
+                rate = i / elapsed if elapsed > 0 else 0
+                eta = (len(tiff_files) - i) / rate if rate > 0 else 0
+                print(f"  Progress: {i}/{len(tiff_files)} ({i/len(tiff_files)*100:.0f}%) | "
+                      f"Rate: {rate:.1f} files/s | ETA: {eta/60:.1f}min", end='\r')
+    
+    print()
     
     if not records:
         print("\n No valid images processed!")
@@ -257,32 +294,25 @@ def process_directory_parallel(input_dir, max_workers=2):
     
     df = pd.DataFrame(records).sort_values("date").reset_index(drop=True)
     
-    # Print summary
-    print(f"✓ Processed: {len(records)}")
-    print(f"✗ Skipped: {len(skipped)} (too cloudy or errors)")
+    elapsed = time.time() - start_time
+    
+    print(f"PROCESSING SUMMARY")
+    print(f"✓ Processed: {len(records)} in {elapsed/60:.1f} minutes")
+    print(f"✓ Average: {elapsed/len(records):.2f}s per file")
+    print(f"✗ Skipped: {len(skipped)}")
     
     print(f"\nPer year:")
     for year, count in df.groupby('year').size().items():
         print(f"   {year}: {count}")
     
-    print(f"\nValue ranges:")
-    print(f"   NDVI: [{df['NDVI_mean'].min():.3f}, {df['NDVI_mean'].max():.3f}]")
-    print(f"   NBR:  [{df['NBR_mean'].min():.3f}, {df['NBR_mean'].max():.3f}]")
-    print(f"   NDMI: [{df['NDMI_mean'].min():.3f}, {df['NDMI_mean'].max():.3f}]")
-    
-    print(f"\nQuality:")
-    print(f"   Avg valid: {df['valid_fraction'].mean()*100:.1f}%")
-    print(f"   Min valid: {df['valid_fraction'].min()*100:.1f}%")
-    
-    if skipped and len(skipped) <= 10:
+    if skipped and len(skipped) <= 5:
         print(f"\nSkipped files:")
         for filename, error in skipped:
             print(f"   • {filename}: {error}")
     elif skipped:
-        print(f"\nSkipped files (first 10):")
-        for filename, error in skipped[:10]:
+        print(f"\nSkipped (showing first 5 of {len(skipped)}):")
+        for filename, error in skipped[:5]:
             print(f"   • {filename}: {error}")
-        print(f"   ... and {len(skipped)-10} more")
     
     return df
 
@@ -293,37 +323,29 @@ def process_directory_parallel(input_dir, max_workers=2):
 
 if __name__ == "__main__":
     
-    # Verify directory exists
+    overall_start = time.time()
+    
     if not DRIVE_INPUT_DIR.exists():
         print(f"\n ERROR: Directory not found!")
         print(f"   Looking for: {DRIVE_INPUT_DIR}")
-        print(f"\n Contents of My Drive:")
-        if MY_DRIVE.exists():
-            for item in sorted(MY_DRIVE.iterdir()):
-                if item.is_dir():
-                    print(f"{item.name}")
         exit(1)
     
     OUTPUT_DIR.mkdir(exist_ok=True)
     
-    # STEP 1: Process all raw TIFF files (extract metadata)
-    if USE_PARALLEL:
-        df = process_directory_parallel(DRIVE_INPUT_DIR, max_workers=MAX_WORKERS)
-    else:
-        print(" Serial processing not implemented - using parallel")
-        df = process_directory_parallel(DRIVE_INPUT_DIR, max_workers=MAX_WORKERS)
+    # STEP 1: Process raw images
+    df = process_directory_parallel_fast(DRIVE_INPUT_DIR, max_workers=MAX_WORKERS)
     
     if df is None:
         print("\n Preprocessing failed!")
         exit(1)
     
-    # Save raw image metadata
+    # Save raw metadata
     raw_csv = OUTPUT_DIR / "01_all_images.csv"
     df.to_csv(raw_csv, index=False)
-    print(f"\n✓ Saved raw metadata: {raw_csv} ({len(df)} images)")
+    print(f"\n✓ Saved raw metadata: {raw_csv}")
     
-    # STEP 2: Create pixel-level composites
-    composites_df = create_composites_from_images(
+    # STEP 2: Create composites
+    composites_df = create_composites_from_images_fast(
         df, 
         OUTPUT_COMPOSITES_DIR, 
         days=COMPOSITE_DAYS
@@ -333,11 +355,13 @@ if __name__ == "__main__":
     composites_df.to_csv(OUTPUT_CSV, index=False)
     composites_df.to_pickle(OUTPUT_PKL)
     
-    print(f"OUTPUT FILES")
-    print(f"Raw metadata:     {raw_csv} ({len(df)} images)")
-    print(f"Composites (CSV): {OUTPUT_CSV} ({len(composites_df)} composites)")
-    print(f"Composites (PKL): {OUTPUT_PKL}")
-    print(f"Composite TIFFs:  {OUTPUT_COMPOSITES_DIR}/ ({len(composites_df)} files)")
+    overall_elapsed = time.time() - overall_start
     
+    print(f" PREPROCESSING COMPLETE!")
+    print(f"\nOutput files:")
+    print(f"  Raw metadata:     {raw_csv} ({len(df)} images)")
+    print(f"  Composites (CSV): {OUTPUT_CSV} ({len(composites_df)} composites)")
+    print(f"  Composite TIFFs:  {OUTPUT_COMPOSITES_DIR}/ ({len(composites_df)} files)")
 
-    
+
+
