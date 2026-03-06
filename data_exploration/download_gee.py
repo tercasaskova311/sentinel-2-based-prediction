@@ -8,10 +8,10 @@ import os
 from datetime import datetime, timedelta
 
 AOI_PATH = "data/boundaries/sumava_aoi_clean.geojson"
-RESUME_FROM_DATE = "2022-05-19"  
+RESUME_FROM_DATE = "2022-07-22"  
 START_YEAR = 2022
 END_YEAR = 2024
-MAX_CLOUD = 50  #50% cloud cover = later I will filter more strictly during preprocessing 
+MAX_CLOUD = 50  #50% cloud cover = later we will filter more strictly during preprocessing 
 RESOLUTION = 20  # meters
 
 ee.Initialize(project='deforestration-detection')
