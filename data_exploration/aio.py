@@ -109,7 +109,7 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
                 print(f"   ⚠️ Area differs from expected - may need verification")
             
             # Save
-            self.save_all_formats(gdf, "sumava_np_osm")
+            self.save_geojson(gdf, "sumava_np_osm")
             
             return gdf
             
@@ -226,7 +226,7 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
             area_km2 = gdf_utm.geometry.area.sum() / 1_000_000
             print(f"\n📏 Area: {area_km2:.2f} km²")
             
-            self.save_all_formats(gdf, "sumava_np_nominatim")
+            self.save_geojson(gdf, "sumava_np_nominatim")
             
             return gdf
             
@@ -234,44 +234,6 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
             print(f"\n❌ Nominatim error: {e}")
             return self.download_from_geojson_io()
     
-    def download_from_geojson_io(self):
-        """
-        Use geojson.io / GitHub datasets as fallback
-        """
-        print("\n" + "="*70)
-        print("FALLBACK: GITHUB GEOJSON DATASETS")
-        print("="*70)
-        
-        # Try various GitHub sources for Czech protected areas
-        github_sources = [
-            # Natural Earth Data - protected areas
-            "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_parks_and_protected_lands.geojson",
-        ]
-        
-        for url in github_sources:
-            try:
-                print(f"\n📥 Trying: {url.split('/')[-1]}")
-                gdf = gpd.read_file(url)
-                
-                # Filter for Šumava
-                mask = gdf.apply(
-                    lambda row: any('umava' in str(val).lower() for val in row.values if isinstance(val, str)),
-                    axis=1
-                )
-                
-                gdf_sumava = gdf[mask]
-                
-                if len(gdf_sumava) > 0:
-                    print(f"   ✅ Found Šumava in dataset!")
-                    self.save_all_formats(gdf_sumava, "sumava_np_github")
-                    return gdf_sumava
-                    
-            except Exception as e:
-                print(f"   ⚠️ Failed: {e}")
-                continue
-        
-        print("\n❌ All GitHub sources failed")
-        return None
     
     def download_sumava_chko(self):
         """Download CHKO Šumava from OSM"""
@@ -315,7 +277,7 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
                 
                 if features:
                     gdf = gpd.GeoDataFrame.from_features(features, crs='EPSG:4326')
-                    self.save_all_formats(gdf, "sumava_chko_osm")
+                    self.save_geojson(gdf, "sumava_chko_osm")
                     return gdf
             else:
                 print("\n⚠️ No CHKO found in OSM")
@@ -325,7 +287,7 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
         
         return None
     
-    def save_all_formats(self, gdf, name):
+    def save_geojson(self, gdf, name):
         """Save in multiple formats"""
         try:
             # GeoJSON
@@ -333,21 +295,6 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
             gdf.to_file(geojson_path, driver='GeoJSON')
             print(f"\n💾 Saved formats:")
             print(f"   📄 GeoJSON: {geojson_path}")
-            
-            # Shapefile
-            shp_path = self.output_dir / f"{name}.shp"
-            gdf.to_file(shp_path, driver='ESRI Shapefile')
-            print(f"   📄 Shapefile: {shp_path}")
-            
-            # GeoPackage
-            gpkg_path = self.output_dir / f"{name}.gpkg"
-            gdf.to_file(gpkg_path, driver='GPKG')
-            print(f"   📦 GeoPackage: {gpkg_path}")
-            
-            # KML
-            kml_path = self.output_dir / f"{name}.kml"
-            gdf.to_file(kml_path, driver='KML')
-            print(f"   🌍 KML: {kml_path}")
             
         except Exception as e:
             print(f"   ⚠️ Format conversion error: {e}")
@@ -408,13 +355,24 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
             print("   → sumava_np_osm.geojson")
 
 if __name__ == "__main__":
-    downloader = SumavaOSMDownloader(output_dir="sumava_data")
+    downloader = SumavaOSMDownloader(output_dir="data/boundaries")
     downloader.run()
 
 # Load your data
-cze_2 = gpd.read_file("sumava_zones_2.geojson")
-filtered_json = cze_2[cze_2['KAT'] == "NP"]
-aoi = filtered_json.dissolve()
+aoi_park = gpd.read_file("data/boundaries/sumava_np_osm.geojson")
+aoi_chko = gpd.read_file("data/boundaries/sumava_chko_osm.geojson")
+# check if they are in the same CRS and general park boundary contains the chko
+is_same_crs = aoi_park.crs == aoi_chko.crs
+is_chko_within_park = aoi_chko.geometry.within(aoi_park.geometry).all()
+
+if is_same_crs and is_chko_within_park:
+    print("CRS matches and CHKO is within the Park boundary")
+    print("CSR for both: ", aoi_park.crs)
+else: 
+    print("CRS mismatch or CHKO not within Park - check data")
+    raise ValueError("Data integrity issue")
+
+aoi = aoi_park.dissolve()
 aoi_proj = aoi.to_crs(32633)  # UTM zone 33N
 area_km2 = aoi_proj.geometry.area.sum() / 1e6
 aoi_proj.to_file("sumava_aoi_clean_proj.geojson", driver="GeoJSON")
