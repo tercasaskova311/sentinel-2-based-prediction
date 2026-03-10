@@ -2,6 +2,5 @@ data/
 __pycache__/
 .DS_Store
 output/
-main.ipynb
-_venv/
 ipynb_checkpoints/
+.venv/
