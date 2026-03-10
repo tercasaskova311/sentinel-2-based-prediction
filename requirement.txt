@@ -3,3 +3,5 @@ geopandas
 matplotlib 
 numpy 
 pandas
+folium
+mapclassify

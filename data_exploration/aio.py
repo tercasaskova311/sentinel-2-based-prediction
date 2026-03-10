@@ -6,6 +6,8 @@ import time
 import geopandas as gpd
 import matplotlib.pyplot as plt
 from shapely.geometry import box
+from shapely.geometry import MultiPolygon, mapping, LineString
+from shapely.ops import linemerge, polygonize
 import os
 
 class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Overpass API
@@ -31,18 +33,21 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
         overpass_query = """
         [out:json][timeout:60];
         (
+          // Also search by wikidata ID (most reliable)
+          relation["wikidata"="Q864799"];
           // Search for Šumava National Park relation
           relation["boundary"="protected_area"]["protect_class"="2"]["name:cs"~"Šumava",i];
           relation["boundary"="national_park"]["name:cs"~"Šumava",i];
+
+          // Some protected areas may not be tagged as national parks as well as protect class 2, so we also search more broadly for any protected area with Šumava in the name
+          // which might include Sumava CHKO or other related protected areas. We will filter those later based on area and name.
           relation["boundary"="protected_area"]["name"~"Šumava",i];
           relation["leisure"="nature_reserve"]["name"~"Šumava",i];
-          // Also search by wikidata ID (most reliable)
-          relation["wikidata"="Q213460"];
         );
         out geom;
         """
         
-        print("\n📥 Querying Overpass API...")
+        print("\n Querying Overpass API...")
         print("   This may take 10-30 seconds...")
         
         try:
@@ -56,10 +61,10 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
             data = response.json()
             
             if 'elements' not in data or len(data['elements']) == 0:
-                print("\n❌ No results from OSM")
+                print("\nNo results from OSM")
                 return self.try_osm_nominatim()
             
-            print(f"\n✅ Found {len(data['elements'])} OSM element(s)")
+            print(f"\n Found {len(data['elements'])} OSM element(s)")
             
             # Convert OSM JSON to GeoDataFrame
             features = []
@@ -71,6 +76,7 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
                         properties = element.get('tags', {})
                         properties['osm_id'] = element['id']
                         properties['osm_type'] = element['type']
+                        properties['name'] = element['tags'].get('name', 'N/A')
                         features.append({
                             'type': 'Feature',
                             'geometry': geometry,
@@ -78,7 +84,7 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
                         })
             
             if not features:
-                print("\n⚠️ Could not extract geometries from OSM")
+                print("\n Could not extract geometries from OSM")
                 return self.try_osm_nominatim()
             
             # Create GeoDataFrame
@@ -108,20 +114,17 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
             return gdf
             
         except requests.exceptions.Timeout:
-            print("\n⚠️ Overpass API timeout - trying alternative method...")
+            print("\n Overpass API timeout - trying alternative method...")
             return self.try_osm_nominatim()
         
         except Exception as e:
-            print(f"\n❌ OSM download error: {e}")
+            print(f"\n OSM download error: {e}")
             return self.try_osm_nominatim()
     
     def osm_relation_to_geometry(self, relation):
         """Convert OSM relation to geometry"""
         try:
-            from shapely.geometry import Polygon, MultiPolygon, mapping
-            from shapely.ops import unary_union
-            
-            if 'geometry' in relation:
+            if 'members' in relation:
                 # Overpass returns geometry in a specific format
                 members = relation['members']
                 
@@ -130,24 +133,26 @@ class SumavaOSMDownloader: #Download Šumava NP data from OpenStreetMap using Ov
                 for member in members:
                     if member.get('role') == 'outer' and 'geometry' in member:
                         coords = [(node['lon'], node['lat']) for node in member['geometry']]
-                        if len(coords) >= 3:
-                            outer_ways.append(coords)
+                        if len(coords) >= 2:
+                            outer_ways.append(LineString(coords))
                 
                 if outer_ways:
+                    # connect those ways into multi-lines
+                    merged = linemerge(outer_ways)
+
+                    # polygonize the merged lines
+                    polygons = list(polygonize(merged))
                     # Try to create polygon
                     if len(outer_ways) == 1:
-                        return mapping(Polygon(outer_ways[0]))
+                        return mapping(polygons[0])
                     else:
                         # Multiple outer ways - try to merge
-                        polygons = [Polygon(way) for way in outer_ways if len(way) >= 3]
-                        if polygons:
-                            merged = unary_union(polygons)
-                            return mapping(merged)
+                        return mapping(MultiPolygon(polygons))
             
             return None
             
         except Exception as e:
-            print(f"   ⚠️ Geometry conversion error: {e}")
+            print(f"Geometry conversion error: {e}")
             return None
     
     def try_osm_nominatim(self):
