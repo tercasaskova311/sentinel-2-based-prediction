@@ -1,5 +1,9 @@
-rasterio 
-geopandas 
-matplotlib 
-numpy 
-pandas
+rasterio==1.4.0
+geopandas==1.1.2
+matplotlib==3.10.8
+numpy==2.4.2
+pandas==2.3.3
+folium==0.20.0
+mapclassify==2.10.0
+seaborn==0.13.2
+geemap==0.37.1
