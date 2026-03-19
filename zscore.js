@@ -1,5 +1,7 @@
-// =============================================================================
-// ŠUMAVA NP — FOREST DISTURBANCE DETECTION
+// to be run in google earth engine code console 
+
+//=============================================================================
+// ŠUMAVA NP — FOREST DISTURBANCE DETECTION - THROUGHT ZSCORE
 // Same-season rolling z-score · Sentinel-2 only · Zero external labels
 //
 // No Hansen. No training data. No ground truth dependency.
@@ -19,7 +21,7 @@
 
 
 // =============================================================================
-// 0. CONFIGURATION
+// CONFIG
 // =============================================================================
 
 var CONFIG = {
@@ -44,7 +46,7 @@ var CONFIG = {
   zThreshNDVI: -2.0,
 
   // Min number of scenes that must flag a pixel (persistence check)
-  minScenes: 2,
+  minScenes: 3,
 
   // Min contiguous patch size in pixels (10m: 50 px = 0.5 ha)
   minPatchPx: 50,
@@ -59,21 +61,16 @@ var CONFIG = {
 };
 
 
-// =============================================================================
 // 1. AOI
-// =============================================================================
-
-
 
 print('AOI area (km²):', aoi.area(1).divide(1e6).round());
 
 
-// =============================================================================
 // 2. FOREST MASK — ESA WorldCover 2021
 // =============================================================================
 //
 // WorldCover classes (10m):
-//   10 = Tree cover       ← what we want
+//   10 = Tree cover       - what we want
 //   20 = Shrubland
 //   30 = Grassland
 //   40 = Cropland
@@ -122,9 +119,7 @@ print('WorldCover core forest area (km2):',
 );
 
 
-// =============================================================================
 // 3. SENTINEL-2 PREPROCESSING
-// =============================================================================
 
 function scaleS2(img) {
   return img.select('B.*').multiply(0.0001)
@@ -163,10 +158,7 @@ function loadS2(start, end) {
     .map(addIndices);
 }
 
-
-// =============================================================================
 // 4. LOAD COLLECTIONS
-// =============================================================================
 
 var s2Archive   = loadS2(CONFIG.archiveStart, CONFIG.archiveEnd);
 var s2Detection = loadS2(CONFIG.detectStart,  CONFIG.detectEnd);
@@ -174,11 +166,7 @@ var s2Detection = loadS2(CONFIG.detectStart,  CONFIG.detectEnd);
 print('S2 archive images:',   s2Archive.size());
 print('S2 detection images:', s2Detection.size());
 
-
-// =============================================================================
 // 5. PRECOMPUTE MONTHLY BASELINES
-// =============================================================================
-//
 // Built ONCE per season month outside of map() — avoids rebuilding the entire
 // archive computation graph for each of the 152 detection images.
 //
@@ -206,9 +194,7 @@ var baselineCol = ee.ImageCollection(baselineImages);
 print('Baselines precomputed for months ' + CONFIG.seasonStart + '–' + CONFIG.seasonEnd);
 
 
-// =============================================================================
 // 6. SCORE DETECTION IMAGES
-// =============================================================================
 
 function scoreImage(img) {
   var month    = img.date().get('month');
@@ -239,9 +225,7 @@ var s2Scored = s2Detection.map(scoreImage);
 print('Scoring complete');
 
 
-// =============================================================================
 // 7. PERSISTENCE FILTER
-// =============================================================================
 
 var alertCount = s2Scored.select('alert').sum().rename('alert_count');
 
@@ -250,10 +234,7 @@ var persistentAlert = alertCount
   .rename('persistent_alert');
 
 
-// =============================================================================
 // 8. FOREST MASK + PATCH FILTER
-// =============================================================================
-
 var maskedAlert = persistentAlert.updateMask(coreForest);
 
 var patchSize  = maskedAlert.connectedPixelCount(CONFIG.minPatchPx + 1);
@@ -262,10 +243,7 @@ var cleanAlert = maskedAlert
   .rename('clean_alert');
 
 
-// =============================================================================
 // 9. DIAGNOSTICS
-// =============================================================================
-
 // Most extreme NBR z-score per pixel — use to tune zThreshNBR
 var nbrZMin = s2Scored.select('NBR_z').min().rename('NBR_z_min');
 
@@ -284,10 +262,7 @@ var firstAlertDay = s2Scored
   .rename('first_alert_day');
 
 
-// =============================================================================
 // 10. VISUALISATION
-// =============================================================================
-
 Map.centerObject(aoi, 11);
 
 // True colour
@@ -302,42 +277,42 @@ var s2TC = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
 Map.addLayer(s2TC,
   {min: 0, max: 0.3, gamma: 1.4},
   'S2 true colour', true);
-
 // WorldCover tree mask
 Map.addLayer(coreForest.clip(aoi),
   {palette: ['1a9641'], opacity: 0.3},
-  'Forest mask (WorldCover tree cover)', false);
-
+  'Forest mask', false);
+ 
 // NBR z-score min — threshold tuning layer
 Map.addLayer(nbrZMin.clip(aoi),
   {min: -5, max: 0, palette: ['d73027', 'f46d43', 'fdae61', 'ffffbf', 'ffffff']},
-  'NBR z-score min (red = most anomalous)', false);
-
+  'NBR Z-SCORE (min)', false);
+ 
 // Scene count — persistence
 Map.addLayer(alertCount.updateMask(alertCount.gt(0)).clip(aoi),
   {min: 1, max: 10, palette: ['ffffcc', 'feb24c', 'f03b20']},
-  'Alert scene count', false);
-
+  'Scene count', false);
+ 
 // Persistent alerts before patch filter
 Map.addLayer(persistentAlert.selfMask().clip(aoi),
   {palette: ['FFA500'], opacity: 0.7},
-  'Persistent alerts (pre patch filter)', false);
-
+  'Candidate elerts', false);
+ 
 // Final alerts — primary output
 Map.addLayer(cleanAlert.selfMask().clip(aoi),
   {palette: ['FF0000'], opacity: 0.9},
-  'FINAL ALERTS', true);
-
+  'Final deforestration alert', true);
+ 
 // First alert day
 Map.addLayer(firstAlertDay.clip(aoi),
   {min: 0, max: 365, palette: ['d94701', 'fd8d3c', 'ffffcc']},
-  'First alert day (orange = earlier)', false);
-
+  'Final alert day', false);
+ 
 // NP boundary
 Map.addLayer(
   ee.Image().paint(ee.FeatureCollection([ee.Feature(aoi)]), 0, 2),
   {palette: ['00ffff']}, 'Šumava NP boundary');
-
+ 
+ 
 
 // =============================================================================
 // 11. CONSOLE STATS
