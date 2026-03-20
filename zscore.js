@@ -1,4 +1,5 @@
 // to be run in google earth engine code console 
+// - current code can be found here: https://code.earthengine.google.com/fbc75d2e7ca7a942032146e1c540a277
 
 //=============================================================================
 // ŠUMAVA NP — FOREST DISTURBANCE DETECTION - THROUGHT ZSCORE
