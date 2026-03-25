@@ -48,7 +48,7 @@ var CONFIG = {
   zThreshResidual: -2.5,
 
   // Min scenes that must flag a pixel (consecutive confirmation)
-  minScenes: 2,
+  minScenes: 3,
 
   // Min contiguous patch: 50 px at 10m = 0.5 ha
   minPatchPx: 50,
@@ -67,50 +67,7 @@ var CONFIG = {
 // 1. AOI
 // =============================================================================
 
-var aoi = ee.Geometry.Polygon([[
-  [13.23115,49.12411],[13.23606,49.11372],[13.27640,49.12048],
-  [13.28918,49.11864],[13.34418,49.08889],[13.34641,49.08206],
-  [13.37049,49.06746],[13.37622,49.05826],[13.39629,49.05154],
-  [13.39787,49.04579],[13.39167,49.04215],[13.39966,49.03707],
-  [13.40583,49.02385],[13.40029,49.01567],[13.40941,49.00322],
-  [13.40227,48.99444],[13.40272,48.98722],[13.42439,48.97741],
-  [13.42618,48.97249],[13.45926,48.96267],[13.49577,48.94149],
-  [13.50827,48.94214],[13.50706,48.96912],[13.52927,48.97405],
-  [13.54806,48.96688],[13.58390,48.96921],[13.59300,48.96089],
-  [13.59034,48.95297],[13.61025,48.93862],[13.60792,48.94351],
-  [13.62860,48.94924],[13.63112,48.94700],[13.62249,48.93881],
-  [13.63802,48.92569],[13.63802,48.91923],[13.65548,48.89358],
-  [13.66965,48.89051],[13.67144,48.88015],[13.71687,48.87814],
-  [13.73054,48.88712],[13.73794,48.88602],[13.73730,48.87934],
-  [13.75061,48.86683],[13.74945,48.85965],[13.76444,48.83448],
-  [13.79295,48.83012],[13.78818,48.82485],[13.81525,48.79709],
-  [13.80355,48.78086],[13.81320,48.77402],[13.87613,48.76661],
-  [13.91022,48.74750],[13.93917,48.72324],[13.95371,48.72074],
-  [13.95589,48.71442],[13.98213,48.72058],[13.97977,48.73080],
-  [13.97278,48.73298],[13.96853,48.74391],[13.92272,48.76981],
-  [13.95167,48.79387],[13.96227,48.79577],[13.96643,48.82083],
-  [13.94190,48.84613],[13.91158,48.86257],[13.89953,48.87717],
-  [13.89564,48.89016],[13.88363,48.89959],[13.87344,48.90038],
-  [13.86671,48.89275],[13.85745,48.89470],[13.84173,48.90626],
-  [13.82501,48.90906],[13.82398,48.91639],[13.81244,48.92207],
-  [13.79032,48.91356],[13.77428,48.91371],[13.76833,48.90807],
-  [13.72096,48.90702],[13.72223,48.91334],[13.70721,48.93111],
-  [13.70936,48.94627],[13.71518,48.94707],[13.71385,48.95735],
-  [13.70099,48.96714],[13.68369,48.96742],[13.67245,48.97534],
-  [13.66393,48.99080],[13.67209,49.00270],[13.66691,49.02621],
-  [13.62685,49.03266],[13.62667,49.04386],[13.61972,49.05657],
-  [13.60452,49.05952],[13.60669,49.07734],[13.61410,49.08209],
-  [13.60473,49.08638],[13.60123,49.09920],[13.58730,49.11700],
-  [13.57728,49.12040],[13.57607,49.10765],[13.53489,49.13572],
-  [13.52361,49.13990],[13.50946,49.13807],[13.51223,49.14358],
-  [13.48910,49.14334],[13.46729,49.13631],[13.44514,49.13775],
-  [13.43621,49.14612],[13.44433,49.15502],[13.43555,49.15616],
-  [13.40841,49.17376],[13.36871,49.18225],[13.34450,49.17416],
-  [13.30995,49.19148],[13.30380,49.18948],[13.30653,49.18582],
-  [13.29512,49.17867],[13.29063,49.16805],[13.26024,49.15472],
-  [13.24888,49.14181],[13.24774,49.13761],[13.25200,49.13773],
-  [13.24738,49.12903],[13.23115,49.12411]
-]], null, false);
+
 
 print('AOI area (km²):', aoi.area(1).divide(1e6).round());
 
@@ -165,13 +122,37 @@ function loadS2Season(start, end) {
 
 
 // =============================================================================
-// 3. FOREST MASK — ESA WorldCover 2021
+// 3. FOREST MASK — ESA WorldCover 2021 + NDVI confirmation
 // =============================================================================
+//
+// Two-layer mask:
+//   Layer 1: WorldCover 2021 tree cover class (value=10) — coarse spatial mask
+//   Layer 2: Peak-summer NDVI > 0.5 from 2021 archive — removes rocks,
+//            wet meadows, sparse vegetation incorrectly labelled as tree cover
+//
+// Without the NDVI layer, bare rocky outcrops and wet areas at forest edges
+// produce false alerts because their NBR is structurally low and variable.
+
+// Peak summer NDVI from cloud-free 2021 images (pre-bark-beetle-peak baseline)
+var ndviMask = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(aoi)
+  .filterDate('2021-06-01', '2021-09-01')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(scaleS2)
+  .map(maskClouds)
+  .map(function(img) {
+    return img.select('B8').subtract(img.select('B4'))
+      .divide(img.select('B8').add(img.select('B4')))
+      .rename('NDVI');
+  })
+  .median()
+  .gt(0.5);    // only pixels with strong summer greenness pass
 
 var coreForest = ee.ImageCollection('ESA/WorldCover/v200')
   .first().select('Map').clip(aoi)
-  .eq(10)
-  .focalMin({radius: 1, kernelType: 'square', units: 'pixels'})
+  .eq(10)                                              // tree cover class only
+  .and(ndviMask)                                       // must also be vegetated
+  .focalMin({radius: 1, kernelType: 'square', units: 'pixels'})  // edge removal
   .eq(1).rename('forest').selfMask().clip(aoi);
 
 print('Core forest area (km²):',
@@ -329,22 +310,33 @@ print('RMSE computed');
 
 
 // =============================================================================
-// 7. ALREADY-DEGRADED MASK
+// 7. ALREADY-DEGRADED MASK — harmonic trend coefficient
 // =============================================================================
 //
-// Pixels already anomalous in 2024 (z < -1.5) are excluded.
-// Uses the same harmonic model — consistent with detection methodology.
+// Uses the fitted model's own trend coefficient (c1) to identify pixels
+// in systematic long-term decline across 2020-2024.
+//
+// c1 = the linear trend term from the harmonic regression.
+// A strongly negative c1 means NBR has been declining year-over-year —
+// the signature of multi-year bark-beetle mortality or chronic drought stress.
+//
+// Advantages over checking specific years:
+//   - Uses ALL 5 archive years simultaneously (no extra data loads)
+//   - Zero additional memory cost — coefficients already computed in section 5
+//   - Catches monotonic decline specifically, not just a single bad year
+//   - A pixel that had one bad year but recovered is NOT excluded
+//
+// Threshold: c1 / RMSE < -0.5 means declining at >0.5 RMSE units per year.
+// Tune upward (e.g. -0.3) to exclude more pre-existing stress,
+// downward (e.g. -0.8) to be more conservative about exclusions.
 
-var archive2024Residuals = loadS2Season('2024-01-01', '2025-01-01')
-  .map(predictNBR);
+var trendCoeff = coefficients.select('t');  // c1: linear trend per pixel
 
-var alreadyDegraded = archive2024Residuals
-  .mean()
-  .divide(rmse)
-  .lt(-1.5)
+var alreadyDegraded = trendCoeff.divide(rmse)
+  .lt(-0.5)
   .rename('already_degraded');
 
-print('Already-degraded mask built');
+print('Already-degraded mask built (using harmonic trend coefficient c1)');
 
 
 // =============================================================================
@@ -509,7 +501,7 @@ var degradedHa = ee.Number(
   alreadyDegraded.selfMask()
     .multiply(ee.Image.pixelArea())
     .reduceRegion({reducer: ee.Reducer.sum(), geometry: aoi,
-                   scale: 100, maxPixels: 1e10, bestEffort: true})
+                   scale: 200, maxPixels: 1e10, bestEffort: true})
     .get('already_degraded')
 ).divide(1e4).round();
 
@@ -517,7 +509,7 @@ var persistHa = ee.Number(
   persistentAlert.selfMask()
     .multiply(ee.Image.pixelArea())
     .reduceRegion({reducer: ee.Reducer.sum(), geometry: aoi,
-                   scale: 100, maxPixels: 1e10, bestEffort: true})
+                   scale: 200, maxPixels: 1e10, bestEffort: true})
     .get('persistent_alert')
 ).divide(1e4).round();
 
@@ -525,13 +517,13 @@ var newAlertHa = ee.Number(
   newAlert.selfMask()
     .multiply(ee.Image.pixelArea())
     .reduceRegion({reducer: ee.Reducer.sum(), geometry: aoi,
-                   scale: 100, maxPixels: 1e10, bestEffort: true})
+                   scale: 200, maxPixels: 1e10, bestEffort: true})
     .get('persistent_alert')
 ).divide(1e4).round();
 
 var meanScenes = alertCount.updateMask(newAlert)
   .reduceRegion({reducer: ee.Reducer.mean(), geometry: aoi,
-                 scale: 100, maxPixels: 1e10, bestEffort: true})
+                 scale: 200, maxPixels: 1e10, bestEffort: true})
   .get('alert_count');
 
 print('--- Stats ---');
@@ -565,18 +557,22 @@ exportImg(firstAlertDay.unmask(0).clip(aoi),   'sumava_first_day_'    + yr);
 exportImg(rmse.clip(aoi),                      'sumava_rmse_'         + yr);
 exportImg(alreadyDegraded.selfMask().clip(aoi),'sumava_degraded_2024_'+ yr);
 
-Export.table.toDrive({
-  collection: cleanAlert.selfMask().reduceToVectors({
-    geometry: aoi, scale: CONFIG.exportScale,
-    geometryType: 'polygon', eightConnected: true,
-    maxPixels: 1e10, reducer: ee.Reducer.countEvery()
-  }).map(function(f) {
-    return f.set({area_ha: f.geometry().area(1).divide(1e4).round(), year: yr});
-  }),
-  description:    'sumava_alert_polygons_' + yr,
-  folder:         CONFIG.exportFolder,
-  fileNamePrefix: 'sumava_alert_polygons_' + yr,
-  fileFormat:     'GeoJSON'
-});
+// Polygon export removed — reduceToVectors on the harmonic pipeline
+// exceeds GEE memory at any scale due to the deep computation graph.
+//
+// INSTEAD: vectorise locally in QGIS after downloading the raster:
+//   1. Download sumava_alerts_2025.tif from Google Drive
+//   2. QGIS → Raster → Conversion → Polygonize (Raster to Vector)
+//      Input: sumava_alerts_2025.tif
+//      Field name: alert
+//      Check "Use 8-connectedness"
+//   3. Open attribute table → select features where alert = 1 → save as GeoJSON
+//   4. Add area_ha field: open field calculator → $area / 10000
+//
+// The exported raster (sumava_alerts_2025.tif) is the primary output.
+// All accuracy assessment and visual validation can be done from the raster
+// directly in QGIS alongside Google Satellite / S2 August 2025 imagery.
+
+print('Note: vectorise sumava_alerts_2025.tif locally in QGIS (see comments above)');
 
 print('=== Exports queued — run from Tasks panel ===');
