@@ -1,11 +1,50 @@
-AOI area (km²): 682
-Core forest area (km²): 458
-S2 archive images (full year): 786
-S2 detection images (season): 152
-Harmonic model fitted — predictors: 6
+# Šumava NP — Forest Disturbance Detection: Notes
 
-Already degraded in 2024, excluded (ha): 266
-Candidate alerts, pre-filters (ha): 704
-New disturbance alerts, pre-patch (ha): 80
-Mean scene count per alert pixel: 6.347059580491571
+## Study Area
+| Parameter        | Value   
+| AOI area         | 682 km² 
+| Core forest area | 458 km² 
 
+---
+
+## Model Configuration
+| Parameter                  | Value 
+| Archive period             | 2020-01-01 → 2025-01-01 
+| Detection season           | April – November 
+| Harmonic predictors        | 6 (constant, t, sin1, cos1, sin2, cos2) 
+| Already-degraded threshold | c1/RMSE < −0.8 
+| Persistence threshold      | ≥ 3 scenes 
+| Min patch size             | 50 px 
+
+---
+
+## Results by Year
+
+| Metric                           | 2024                  | 2025 
+| Archive images                   | 644                   | 786 
+| Detection images (season)        | 104                   | 195 
+| Already degraded, excluded       | 340 ha                | 266 ha 
+| Candidate alerts (pre-filters)   | 1,391 ha              | 1,860 ha 
+| New disturbance alerts           | 876 ha                | 630 ha 
+| Mean scene count per alert pixel | 3.99                  | 4.47 
+
+---
+
+## Validation (2024)
+| Stratum                               | n 
+| Stratum 1 — alert pixels              | 100 
+| Stratum 2 — forest (non-alert) pixels | 100 
+| Alert area                            | 54 ha 
+| Forest (non-alert) area               | 34,480 ha 
+
+### Labelling Protocol
+For each validation point, toggle the 2024 vs 2023 (or 2025 vs 2024) S2 composites and assign one label:
+
+| Label        | Criterion 
+| **TP**       | Canopy present in prior year, gone in detection year 
+| **FP**       | Canopy present in both years — false alarm 
+| **FP_cloud** | Cloud or shadow artefact 
+| **TN**       | Intact forest in both years — correct non-detection 
+| **FN**       | Obvious damage present but not flagged 
+
+> Canopy gone already in the prior year → expected miss (captured by already-degraded mask, excluded by design).

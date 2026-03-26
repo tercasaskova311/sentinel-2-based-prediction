@@ -6,9 +6,9 @@ import numpy as np
 # =============================================================================
 # CONFIG — change filename to your latest version
 # =============================================================================
-TIF_PATH     = '/Users/terezasaskova/Downloads/sumava_alerts_2025-6.tif'
-GEOJSON_RAW  = '/Users/terezasaskova/Downloads/alerts_raw.geojson'
-GEOJSON_OUT  = '/Users/terezasaskova/Downloads/alerts_final.geojson'
+TIF_PATH     = '/Users/terezasaskova/Downloads/sumava_alerts_2024.tif'
+GEOJSON_RAW  = '/Users/terezasaskova/Downloads/alerts_raw_2024.geojson'
+GEOJSON_OUT  = '/Users/terezasaskova/Downloads/alerts_final_2024.geojson'
 
 # =============================================================================
 # 1. Check raster
@@ -94,3 +94,23 @@ with open(GEOJSON_OUT, 'w') as f:
 
 print(f'Saved → {GEOJSON_OUT}')
 print('Load in QGIS → assign CRS EPSG:32633 if prompted')
+
+
+
+
+import pandas as pd
+
+df = pd.read_csv('sumava_validation_sample_2024.csv')
+
+# Stratum 1 — precision
+s1 = df[df['stratum'] == 'ALERT']
+precision = (s1['interpretation'] == 'TP').sum() / len(s1)
+
+# Stratum 2 — rough recall estimate  
+s2 = df[df['stratum'] == 'FOREST']
+fn_rate = (s2['interpretation'] == 'FN').sum() / len(s2)
+recall_approx = 1 - fn_rate
+
+print(f'Precision : {precision:.2f}')
+print(f'Recall    : {recall_approx:.2f}')
+print(f'F1        : {2*precision*recall_approx/(precision+recall_approx):.2f}')
