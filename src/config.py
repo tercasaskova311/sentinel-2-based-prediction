@@ -1,5 +1,6 @@
 # GEE Config
-EE_PROJECT_ID = 'deforestation-detection-481313'
+EE_PROJECT_ID = 'disturbance-detection'
+# 'deforestation-detection-481313'
 
 # Classification codes
 WORLDCOVER_CLASS_TREES = 10

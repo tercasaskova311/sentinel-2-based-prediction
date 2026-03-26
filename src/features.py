@@ -1,29 +1,56 @@
 import ee
 from src import config
+def _mask_s2_clouds(image):
+    """
+    Mask clouds and cirrus in Sentinel-2 surface reflectance images using the QA60 band.
+    The QA60 band contains bit flags for clouds and cirrus:
+    - Bit 10: Cloud mask (1 = cloud, 0 = clear)
+    - Bit 11: Cirrus mask (1 = cirrus, 0 = clear)
+    This function creates a mask that keeps only pixels where both cloud and cirrus bits are 0 (i.e., clear pixels).
+    Args:
+        image (ee.Image): A Sentinel-2 surface reflectance image with a QA60 band.
+    Returns:
+        ee.Image: The input image with clouds and cirrus masked out.
+    """
+    qa = image.select('QA60')
+    cloud_bit_mask  = 1 << 10
+    cirrus_bit_mask = 1 << 11
+    mask = (qa.bitwiseAnd(cloud_bit_mask).eq(0)
+              .And(qa.bitwiseAnd(cirrus_bit_mask).eq(0)))
+    return image.updateMask(mask)
+
 
 def build_s2_composite(year, months, aoi, bands,
                        s2_collection_name='COPERNICUS/S2_SR_HARMONIZED',
-                       cloud_threshold=20):
+                       cloud_threshold=10, with_count=False):
     start_date = f'{year}-{months[0]:02d}-01'
     end_date   = f'{year}-{months[-1]:02d}-31'
+
+    if year <= 2016:
+        cloud_threshold = 20  # allow more cloud for sparse years
     
     s2_collection = (ee.ImageCollection(s2_collection_name)
         .filterBounds(aoi)
         .filterDate(start_date, end_date)
         .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_threshold))
+        .select(['B4','B8','B11','B12','QA60'])
+        .map(_mask_s2_clouds)
     )
 
     count = s2_collection.size().getInfo()
     print(f'Number of Sentinel-2 images for {year} in AOI: {count}')
 
-    if count < 5:
+    if count < 2:
         print(f'Warning: Only {count} images found for {year}. Consider increasing cloud threshold or expanding date range.')
+        return None
 
     composite = (s2_collection
                  .median()
                  .select(bands)
                  .reproject(crs='EPSG:4326', scale=20)
                  )
+    if with_count:
+        composite = composite.set('image_count', count)
 
     # compute indices
     ndvi = composite.normalizedDifference(['B8', 'B4']).rename('NDVI')
@@ -33,26 +60,37 @@ def build_s2_composite(year, months, aoi, bands,
     return composite
 
 
-def _compute_slope(image_early, image_late, years_apart, band):
+def compute_slope(image_early, image_late, band, years_apart=1):
     return (image_late.select(band)
             .subtract(image_early.select(band))
             .divide(years_apart)
             .rename(f'{band}_slope'))
 
-def _build_yearly_features(s2_early, s2_y1, s2_y2, years_apart):
+
+def rasterize_disturbance_polygons(fc, aoi_ee, scale=20):
+    """
+    Rasterizes the disturbance polygons into a binary image where pixels within any disturbance polygon are set to 1, and others are 0.
+    The resulting image is clipped to the AOI and reprojected to EPSG:4326 with the specified scale.
+    1: disturbance pixel, 0: non-disturbance pixel (background)
+    """
+    # Create a raster where each pixel value is the area of the disturbance polygon it falls into
+    return (ee.Image(0)
+                        .byte().paint(fc, color=1)
+                        .clip(aoi_ee)
+                        .reproject(crs='EPSG:4326', scale=scale)
+                        .rename('disturbance'))
+
+
+
+def build_features(s2_y1, s2_y2, ndvi_slope, nbr_slope):
     """Build features for a given year based on the early year and the year of interest.
     Args:
-        s2_early: ee.Image composite for the early year (e.g., 2018 for training, 2022 for validation)
-        s2_y1: ee.Image composite for the year of interest (e.g., 2020 for training, 2023 for validation)
-        s2_y2: ee.Image composite for the year after the year of interest (e.g., 2021 for training, 2024 for validation)
-        years_apart: number of years between the early year and the year of interest (e.g., 2 for training, 1 for validation)
+        s2_y1: ee.Image composite for the early year
+        s2_y2: ee.Image composite for the year of interest
     Returns:
-        ee.Image: An image containing the features for the year of interest, including the original bands for the year of interest and the slopes of NDVI and NBR between the early year and the
+        ee.Image: An image containing the features for the year of interest, including the original bands for the year of interest and the slopes of NDVI and NBR between the early year and the year of interest
     """
     all_bands = config.S2_BANDS + ['NDVI', 'NBR']
-
-    ndvi_slope  = _compute_slope(s2_early, s2_y2, years_apart, 'NDVI')
-    nbr_slope   = _compute_slope(s2_early, s2_y2, years_apart, 'NBR')
 
     return (s2_y1.select(all_bands)
             .rename([f'{b}_y1' for b in all_bands])
@@ -60,37 +98,3 @@ def _build_yearly_features(s2_early, s2_y1, s2_y2, years_apart):
             .rename([f'{b}_y2' for b in all_bands]))
             .addBands(ndvi_slope)
             .addBands(nbr_slope))
-
-
-def get_all_features(aoi, bands, months=None):
-    if months is None:
-        months = config.MONTHS
-    # Pre-training years: 2018 and 2019
-    s2_2018 = build_s2_composite(year=2018, months=months, aoi=aoi, bands=bands)
-    s2_2019 = build_s2_composite(year=2019, months=months, aoi=aoi, bands=bands)
-
-    # Training years
-    s2_2020 = build_s2_composite(year=2020, months=months, aoi=aoi, bands=bands)
-    s2_2021 = build_s2_composite(year=2021, months=months, aoi=aoi, bands=bands)
-
-    # Validation year
-    s2_2022 = build_s2_composite(year=2022, months=months, aoi=aoi, bands=bands)
-    s2_2023 = build_s2_composite(year=2023, months=months, aoi=aoi, bands=bands)
-
-    # Test year
-    s2_2024 = build_s2_composite(year=2024, months=months, aoi=aoi, bands=bands)
-    s2_2025 = build_s2_composite(year=2025, months=months, aoi=aoi, bands=bands)
-
-
-    train_features      = _build_yearly_features(s2_2018, s2_2020, s2_2021, 3)
-    val_features        = _build_yearly_features(s2_2022, s2_2022, s2_2023, 1)
-    test_features_fair  = _build_yearly_features(s2_2023, s2_2023, s2_2024, 1)
-    test_features       = _build_yearly_features(s2_2024, s2_2024, s2_2025, 1)
-
-    data_sets = {
-        "s2_2020": s2_2020,
-        "s2_2022": s2_2022,
-        "s2_2024": s2_2024,
-    }
-
-    return train_features, val_features, test_features_fair, test_features, data_sets

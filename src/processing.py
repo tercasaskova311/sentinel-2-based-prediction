@@ -1,6 +1,7 @@
 import ee
 from . import config
-def get_confirmed_forest_mask(hansen_treecover:ee.Image, worldcover_map:ee.Image, scale:int, tree_class:int, hansen_tree_cover_threshold:int)->tuple:
+def get_confirmed_forest_mask(hansen_treecover:ee.Image, worldcover_map:ee.Image,
+                              scale:int, tree_class:int, hansen_tree_cover_threshold:int)->tuple:
     """
     Create a confirmed forest mask by combining Hansen tree cover and WorldCover land cover classes.
     - Hansen tree cover > 70% resampled to 20m
@@ -10,7 +11,7 @@ def get_confirmed_forest_mask(hansen_treecover:ee.Image, worldcover_map:ee.Image
 
     Args:
         hansen_treecover: ee.Image with the 'treecover2000' band from the Hansen dataset
-        worldcover_map: ee.Image with the 'Map' band from the ESA WorldCover dataset
+        worldcover_map: ee.Image with the 'Map' band from the ESA WorldCover dataset in 2020
         scale: the scale at which to perform the resampling and calculations (e.g., 20 for 20m)
         tree_class: the WorldCover class value that corresponds to tree cover (e.g., 10)
         hansen_tree_cover_threshold: the canopy cover percentage threshold for Hansen tree cover (e.g., 70)
@@ -39,6 +40,16 @@ def get_confirmed_forest_mask(hansen_treecover:ee.Image, worldcover_map:ee.Image
 
     # Combine Hansen and WorldCover masks
     return was_forest_20m.And(wc_forest_core_20m).rename('confirmed_forest_mask'), was_forest_20m.rename('hansen_forest2000_mask'), wc_forest_core_20m.rename('worldcover_core_forest_mask')
+
+def get_stable_mask(year_labels, was_forest_confirmed, ever_disturbed):
+    """
+    Stable pixels = confirmed forest
+                    AND not disturbed this year
+                    AND never disturbed in any recorded year
+    """
+    return (was_forest_confirmed
+        .And(year_labels.Not())      # not disturbed this year
+        .And(ever_disturbed.Not()))  # never disturbed anywhere
 
 
 def calculate_loss_area_by_year(loss_year_img: ee.Image, mask: ee.Image, aoi: ee.Geometry, scale: int)->dict:
