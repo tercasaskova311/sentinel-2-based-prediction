@@ -1,0 +1,11 @@
+AOI area (km²): 682
+Core forest area (km²): 458
+S2 archive images (full year): 786
+S2 detection images (season): 152
+Harmonic model fitted — predictors: 6
+
+Already degraded in 2024, excluded (ha): 266
+Candidate alerts, pre-filters (ha): 704
+New disturbance alerts, pre-patch (ha): 80
+Mean scene count per alert pixel: 6.347059580491571
+
