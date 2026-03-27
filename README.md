@@ -1,14 +1,18 @@
+Here's your polished README:
 # Šumava NP — Forest Disturbance Detection
 
-Sentinel-2 harmonic regression model  and random forest models for detecting forest disturbance (logging, bark beetle) in Šumava National Park, Czech Republic. 
+Sentinel-2 harmonic regression and random forest models for detecting forest disturbance (logging, bark beetle outbreaks) in Šumava National Park, Czech Republic.
 
-## 1 harmonic regression model 
-- built in Google Earth Engine, loosely based on the CCDC framework (Zhu & Woodcock, 2014).
+## Models
 
-## 2 machine learning models
+### 1 — Harmonic Regression Model
+Built in Google Earth Engine, loosely based on the CCDC framework (Zhu & Woodcock, 2014).
+
+### 2 — Machine Learning Models
 
 ---
-## harmonic regression model  Configuration
+
+## Harmonic Regression — Configuration
 
 All tunable parameters live in the `CONFIG` object at the top of the script:
 
@@ -30,11 +34,12 @@ var CONFIG = {
   exportFolder:    'GEE_Sumava',   // Google Drive output folder
 };
 ```
+
 ---
 
 ## Outputs
 
-### GEE exports (Google Drive → `GEE_Sumava/`)
+### GEE Exports (Google Drive → `GEE_Sumava/`)
 
 | File | Content |
 |------|---------|
@@ -45,9 +50,9 @@ var CONFIG = {
 
 All outputs are `Float32` GeoTIFFs in `EPSG:32633` at 10 m resolution.
 
-> **Important:** exports use `.selfMask()` so masked pixels are written as `NoData`, not `0`. Ensure your GIS software interprets `NoData` correctly before area calculations.
+> **Note:** Exports use `.selfMask()`, so masked pixels are written as `NoData` rather than `0`. Verify that your GIS software interprets `NoData` correctly before performing any area calculations.
 
-### Console stats (GEE)
+### Console Stats (GEE)
 
 After running, the Console prints:
 
@@ -61,22 +66,22 @@ Mean scene count per final alert pixel
 ```
 
 ---
+
 ## 2024 Results
 
 | Metric | Value |
 |--------|-------|
-| Metric                           | 2024                  
-| Archive images                   | 644                   
-| Detection images (season)        | 104                   
-| Candidate alerts (pre-filters)   | 2285 ha              
-| Final alerts post-patch-filter   | 423 ha
-| Mean scene count per final alert pixel | 2.966   
+| Archive images | 644 |
+| Detection images (season) | 104 |
+| Candidate alerts (pre-filters) | 2 285 ha |
+| Final alerts post-patch-filter | 423 ha |
+| Mean scene count per final alert pixel | 2.97 |
 
 ---
 
 ## Known Issues & Limitations
 
-**Slow bark beetle decline** — The abruptness filter (`firstAlertFraction < 0.6`) is designed to separate logging from gradual dieback. Bark beetle outbreaks that begin early in the season may be misclassified as logging. 
+**Slow bark beetle decline** — The abruptness filter (`firstAlertFraction < 0.6`) is intended to separate logging from gradual canopy dieback. Bark beetle outbreaks that begin early in the season may be misclassified as logging events.
 
 ---
 
@@ -95,3 +100,5 @@ Zhu, Z., & Woodcock, C. E. (2014). Continuous change detection and classificatio
 ESA WorldCover 2021 v2.0 — `ESA/WorldCover/v200` via Google Earth Engine.
 
 Copernicus Sentinel-2 Level-2A Surface Reflectance — `COPERNICUS/S2_SR_HARMONIZED` via Google Earth Engine.
+
+---
