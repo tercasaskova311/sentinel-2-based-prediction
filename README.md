@@ -5,23 +5,10 @@ Sentinel-2 harmonic regression model  and random forest models for detecting for
 ## 1 harmonic regression model 
 - built in Google Earth Engine, loosely based on the CCDC framework (Zhu & Woodcock, 2014).
 
-## 2 random forest
+## 2 machine learning models
 
 ---
-
-
-### Detection filters (applied in order)
-
-| Step | Filter | Parameter |
-|------|--------|-----------|
-| 1 | Persistent negative anomaly | `z < −2.5` in ≥ 2 scenes (`minScenes`) |
-| 2 | Core forest mask | ESA WorldCover 2021 tree cover + NDVI > 0.5 confirmation |
-| 3 | Minimum patch size | ≥ 50 connected pixels at 10 m = 0.5 ha (`minPatchPx`) |
-| 4 | Abruptness (logging proxy) | First alert before ~mid-August of detection year |
-
----
-
-## Configuration
+## harmonic regression model  Configuration
 
 All tunable parameters live in the `CONFIG` object at the top of the script:
 
@@ -43,7 +30,6 @@ var CONFIG = {
   exportFolder:    'GEE_Sumava',   // Google Drive output folder
 };
 ```
-
 ---
 
 ## Outputs
@@ -53,7 +39,6 @@ var CONFIG = {
 | File | Content |
 |------|---------|
 | `sumava_alerts_YYYY.tif` | Final disturbance alerts (all types), patch-filtered |
-| `sumava_abrupt_YYYY.tif` | Abrupt alerts — logging proxy |
 | `sumava_residual_z_YYYY.tif` | Minimum residual z-score across detection season |
 | `sumava_scene_count_YYYY.tif` | Number of alert scenes per pixel |
 | `sumava_first_day_YYYY.tif` | Day-of-year of first alert (days since Jan 1) |
@@ -76,45 +61,22 @@ Mean scene count per final alert pixel
 ```
 
 ---
-
-## Polygonization
-
-Convert the exported GeoTIFF to vector polygons:
-
-```bash
-python models/residual_zscore/poligonize_tiff.py
-```
-
-The script polygonizes the raster and filters to `Alert = 1` features. Apply an additional area filter matching `minPatchPx` to ensure consistency with the GEE raster filter:
-
-```python
-MIN_PATCH_HA = 0.5
-gdf = gdf[gdf['Alert'] == 1].copy()
-gdf['area_ha'] = gdf.geometry.area / 1e4
-gdf = gdf[gdf['area_ha'] >= MIN_PATCH_HA]
-```
-
-Output: `sumava_abrupt_2024.geojson` — load in QGIS and assign CRS `EPSG:32633` if prompted.
-
----
-
 ## 2024 Results
 
 | Metric | Value |
 |--------|-------|
-| Archive images | 644 |
-| Detection images (season) | 104 |
-| Core forest area | 458 km² |
-| Candidate alerts (pre-filters) | 2 285 ha |
-| Final alerts (post-patch-filter) | 533 ha |
-| Abrupt alerts — logging proxy | 421 ha |
-| Mean scene count per alert pixel | 2.96 |
+| Metric                           | 2024                  
+| Archive images                   | 644                   
+| Detection images (season)        | 104                   
+| Candidate alerts (pre-filters)   | 2285 ha              
+| Final alerts post-patch-filter   | 423 ha
+| Mean scene count per final alert pixel | 2.966   
 
 ---
 
 ## Known Issues & Limitations
 
-**Slow bark beetle decline** — The abruptness filter (`firstAlertFraction < 0.6`) is designed to separate logging from gradual dieback. Bark beetle outbreaks that begin early in the season may be misclassified as logging. Inspect the `sumava_first_day` layer alongside RGB imagery to disambiguate.
+**Slow bark beetle decline** — The abruptness filter (`firstAlertFraction < 0.6`) is designed to separate logging from gradual dieback. Bark beetle outbreaks that begin early in the season may be misclassified as logging. 
 
 ---
 
