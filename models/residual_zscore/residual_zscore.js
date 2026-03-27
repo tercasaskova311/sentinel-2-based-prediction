@@ -1,4 +1,4 @@
-// =============================================================================
+/ =============================================================================
 // ŠUMAVA NP — FOREST DISTURBANCE DETECTION
 // Harmonic model baseline · Sentinel-2 NBR · Zero external labels
 //
@@ -14,7 +14,7 @@
 // =============================================================================
 
 // ← SWITCH HERE: change DETECT_YEAR to 2024 or 2025
-var DETECT_YEAR = 2025;
+var DETECT_YEAR = 2024;
 
 var CONFIG = {
   archiveStart: '2020-01-01',
@@ -335,7 +335,53 @@ var cleanAlert = newAlert
 
 var firstAlertDay = firstAlertDayRaw.updateMask(cleanAlert);
 
+// =============================================================================
+// 9b. TEMPORAL SPREAD FILTER — separates abrupt from gradual decline
+// =============================================================================
 
+// firstAlertDay: day-of-year relative to detectStart (0 = Apr 1 if seasonStart=4)
+// Abrupt events (clearcuts, windthrow): first alert fires early, stays flagged
+// Gradual decline (bark-beetle): threshold crossed only mid-to-late season
+
+// Days from season start when alert first fires
+// Earlier = more abrupt
+var seasonLengthDays = 214; // Apr 1 → Oct 31 approx
+
+// Fraction through season when first alert fires (0 = Apr, 1 = Oct)
+var firstAlertFraction = firstAlertDayRaw.divide(seasonLengthDays);
+
+// --- Option B: keep based on how SUSTAINED the drop is
+// Deep z-score that appears early = abrupt total loss
+// Shallow z-score late = gradual decline
+// Combine both signals: early AND deep
+var abruptAlert = cleanAlert
+  .updateMask(firstAlertFraction.lt(0.55))      // alert fires before mid-season
+  .updateMask(residZMin.lt(-3.0))               // and is genuinely deep
+  .rename('abrupt_alert');
+  
+// =============================================================================
+// 9b. CLEARCUT CONFIRMATION — low NDVI in detection year
+// =============================================================================
+
+var ndviDetect = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(aoi)
+  .filterDate(DETECT_YEAR + '-06-01', DETECT_YEAR + '-09-30')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(scaleS2).map(maskClouds)
+  .map(function(img) {
+    return img.select('B8').subtract(img.select('B4'))
+      .divide(img.select('B8').add(img.select('B4')))
+      .rename('NDVI');
+  })
+  .median();
+
+var clearcuts = cleanAlert
+  .updateMask(ndviDetect.lt(0.4))
+  .rename('clearcut_alert');
+
+var firstAlertDayClearcut = firstAlertDay.updateMask(clearcuts);
+
+  
 // =============================================================================
 // 10. VISUALISATION
 // =============================================================================
@@ -423,10 +469,13 @@ Map.addLayer(persistentAlert.selfMask().clip(aoi),
   {palette: ['FFA500'], opacity: 0.6},
   'Candidate alerts (pre-filters)', false);
 
-Map.addLayer(cleanAlert.selfMask().clip(aoi),
+Map.addLayer(clearcuts.selfMask().clip(aoi),
   {palette: ['FF0000'], opacity: 0.9},
-  'FINAL ALERTS — new disturbance ' + DETECT_YEAR, true);
+  'FINAL ALERTS — clearcuts only ' + DETECT_YEAR, true);
 
+Map.addLayer(firstAlertDayClearcut.clip(aoi),
+  {min: 0, max: 365, palette: ['d94701', 'fd8d3c', 'ffffcc']},
+  'First alert day — clearcuts only', false);
 Map.addLayer(firstAlertDay.clip(aoi),
   {min: 0, max: 365, palette: ['d94701', 'fd8d3c', 'ffffcc']},
   'First alert day (orange = earlier)', false);
@@ -552,19 +601,6 @@ exportImg(alertCount.clip(aoi),                 'sumava_scene_count_'   + yr);
 exportImg(firstAlertDay.unmask(0).clip(aoi),    'sumava_first_day_'     + yr);
 exportImg(rmse.clip(aoi),                       'sumava_rmse_'          + yr);
 exportImg(alreadyDegraded.selfMask().clip(aoi), 'sumava_degraded_mask_' + yr);
-
-Export.table.toDrive({
-  collection:  alertPoints,
-  description: 'sumava_validation_alert_' + yr,
-  folder:      CONFIG.exportFolder,
-  fileFormat:  'GeoJSON'
-});
-
-Export.table.toDrive({
-  collection:  nonAlertPoints,
-  description: 'sumava_validation_nonalert_' + yr,
-  folder:      CONFIG.exportFolder,
-  fileFormat:  'GeoJSON'
-});
+exportImg(clearcuts, 'sumava_clearcuts_' + yr);
 
 print('=== Exports queued — run from Tasks panel ===');

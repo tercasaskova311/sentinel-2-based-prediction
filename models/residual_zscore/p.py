@@ -97,20 +97,3 @@ print('Load in QGIS → assign CRS EPSG:32633 if prompted')
 
 
 
-
-import pandas as pd
-
-df = pd.read_csv('sumava_validation_sample_2024.csv')
-
-# Stratum 1 — precision
-s1 = df[df['stratum'] == 'ALERT']
-precision = (s1['interpretation'] == 'TP').sum() / len(s1)
-
-# Stratum 2 — rough recall estimate  
-s2 = df[df['stratum'] == 'FOREST']
-fn_rate = (s2['interpretation'] == 'FN').sum() / len(s2)
-recall_approx = 1 - fn_rate
-
-print(f'Precision : {precision:.2f}')
-print(f'Recall    : {recall_approx:.2f}')
-print(f'F1        : {2*precision*recall_approx/(precision+recall_approx):.2f}')

@@ -28,14 +28,43 @@
 | New disturbance alerts           | 876 ha                | 630 ha 
 | Mean scene count per alert pixel | 3.99                  | 4.47 
 
----
 
-## Validation (2024)
-| Stratum                               | n 
-| Stratum 1 — alert pixels              | 100 
-| Stratum 2 — forest (non-alert) pixels | 100 
-| Alert area                            | 54 ha 
-| Forest (non-alert) area               | 34,480 ha 
+Columns: ['alerts', 'area_ha', 'label', 'geometry']
+Total features: 617
+
+--- Label distribution ---
+label
+tp    56
+fp    43
+Name: count, dtype: int64
+
+--- Accuracy ---
+TP: 56
+FP: 43
+Precision (user's accuracy): 56.57%
+
+--- Area (ha) ---
+Total alerted area:  912.1 ha
+TP area:             237.1 ha
+FP area:             212.9 ha
+Mean TP patch size:  4.23 ha
+Mean FP patch size:  4.95 ha
+
+--- Scene count ---
+Mean alert scenes (TP): 1.00
+Mean alert scenes (FP): 1.00
+
+
+
+
+
+
+
+
+
+
+
+
 
 ### Labelling Protocol
 For each validation point, toggle the 2024 vs 2023 (or 2025 vs 2024) S2 composites and assign one label:
