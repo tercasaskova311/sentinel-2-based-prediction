@@ -1,0 +1,43 @@
+# Šumava NP — Forest Disturbance Detection: Notes
+
+## Study Area
+| Parameter        | Value   
+| AOI area         | 682 km² 
+| Core forest area | 458 km² 
+
+---
+
+## Model Configuration
+| Parameter                  | Value 
+| Archive period             | 2020-01-01 → 2024-01-01 
+| Detection season           | April – November 
+| Harmonic predictors        | 6 (constant, t, sin1, cos1, sin2, cos2) 
+| Already-degraded threshold | c1/RMSE < −0.8 
+| Persistence threshold      | ≥ 3 scenes 
+| Min patch size             | 50 px 
+
+---
+
+## Results 
+
+| Metric                           | 2024                  
+| Archive images                   | 644                   
+| Detection images (season)        | 104                   
+| Candidate alerts (pre-filters)   | 2285 ha              
+| Final alerts post-patch-filter   | 423 ha
+| Mean scene count per final alert pixel | 2.966                 
+
+--- Accuracy ---
+Precision (user's accuracy): 62.28% 
+* this is given by 200 labeled polygons
+* fp were observed being distured forest areas with dry wood
+
+### Labelling Protocol
+For each validation point, toggle the 2024 vs 2023 S2 composites and assign one label:
+
+| Label        | Criterion 
+| **TP**       | Canopy present in prior year, gone in detection year 
+| **FP**       | Canopy present in both years — false alarm 
+| **TN**       | Intact forest in both years — correct non-detection 
+| **FN**       | Obvious damage present but not flagged 
+
