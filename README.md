@@ -1,7 +1,6 @@
-Here's your polished README:
 # Šumava NP — Forest Disturbance Detection
 
-Sentinel-2 harmonic regression and random forest models for detecting forest disturbance (logging, bark beetle outbreaks) in Šumava National Park, Czech Republic.
+This repository contains an end-to-end analytical pipeline to detect and classify forest disturbances—primarily logging and bark beetle outbreaks—in the Šumava National Park, Czech Republic. The project integrates **Harmonic Regression Model** baselines generated via Google Earth Engine with advanced, tuned **Machine Learning Classifiers** implemented in Python (`scikit-learn`, `xgboost`). Leveraging multi-temporal Sentinel-2 imagery, the pipeline aims to accurately map yearly disturbances by evaluating robust spatial and temporal features.
 
 ## Models
 
@@ -9,6 +8,39 @@ Sentinel-2 harmonic regression and random forest models for detecting forest dis
 Built in Google Earth Engine, loosely based on the CCDC framework (Zhu & Woodcock, 2014).
 
 ### 2 — Machine Learning Models
+
+Implemented in Python (`scikit-learn`, `xgboost`) for robust classification of forest disturbance. Features are evaluated across temporal and spatial dimensions.
+
+---
+
+## Machine Learning — Configuration
+
+The ML pipeline evaluates spatial and time-series cross-validation strategies, applying hyperparameter tuning to find the optimum model configuration. It is heavily recommended to use the **optimium (tuned)** configuration over the default model options, as tuning adjusts the tree depth, learning rate, and estimator counts for maximum spatial generalizability.
+
+### Optimum Hyperparameter Spaces
+
+Models are optimized via Cross-Validated Grid Search to maximize F1-score across folds:
+
+```python
+# XGBoost Tuned Params Space
+xgb_config = {
+    'n_estimators': [50, 100, 200, 300],
+    'max_depth': [3, 6, 10],
+    'learning_rate': [0.01, 0.1, 0.2]
+}
+
+# Random Forest Tuned Params Space
+rf_config = {
+    'n_estimators': [50, 100, 200],
+    'max_depth': [None, 5, 10, 15],
+    'min_samples_leaf': [1, 5, 10]
+}
+```
+
+### Evaluation Strategy
+
+- **Time-Series CV**: Trains on data from earlier years (e.g., 2016-2020) and validates on subsequent years to test temporal generalizability.
+- **Spatial CV**: Uses `GroupKFold` on optimal spatial clusters (e.g., K=37 generated via `KMeans`) to ensure models generalize to completely unseen areas.
 
 ---
 
@@ -52,6 +84,16 @@ All outputs are `Float32` GeoTIFFs in `EPSG:32633` at 10 m resolution.
 
 > **Note:** Exports use `.selfMask()`, so masked pixels are written as `NoData` rather than `0`. Verify that your GIS software interprets `NoData` correctly before performing any area calculations.
 
+### Local Machine Learning Outputs
+
+| Artifact | Content |
+|----------|---------|
+| `models/lr_model_timeseries.joblib` | Logistic Regression model trained via Time-Series CV |
+| `models/rf_model_spatial.joblib` | Random Forest model trained via Spatial CV |
+| `results/labeled_alerts_24.geojson` | Pre-labeled disturbance alerts for 2024 analysis |
+| `results/sumava_czechglobe/training_samples_map.html` | Interactive web map visualizing the spatial distribution of training class samples |
+| `results/sumava_czechglobe/final_disturbance_map.html` | Interactive web map of predicted spatial disturbances |
+
 ### Console Stats (GEE)
 
 After running, the Console prints:
@@ -67,15 +109,45 @@ Mean scene count per final alert pixel
 
 ---
 
-## 2024 Results
+## Harmonic Regression — Detection Results
 
-| Metric | Value |
-|--------|-------|
+Area detection metrics based on Harmonic Regression:
+
+| Metric | 2024 (Actual) |
+|--------|---------------|
 | Archive images | 644 |
 | Detection images (season) | 104 |
-| Candidate alerts (pre-filters) | 2 285 ha |
+| Candidate alerts (pre-filters) | 2,285 ha |
 | Final alerts post-patch-filter | 423 ha |
 | Mean scene count per final alert pixel | 2.97 |
+
+---
+
+## Machine Learning — 2024 & 2025 Detection Area Summaries
+
+**Threshold:** 0.8
+Results for detected total physical area (km²) from deployed spatial models:
+
+| Metric | Area Forecast (km²) |
+|--------|--------------------|
+| **2024 predicted disturbance** | 32.66 km² |
+| **2025 Predicted Disturbance** | 14.52 km² |
+| **2025 excl. historical** | 8.86 km² |
+| **2025 new only (excl. 2024 & historical)** | 5.16 km² |
+| **2025 new only as % of 2024 pred.** | 15.81% |
+
+---
+
+## Machine Learning — Cross-Validation Performance
+
+Model performance on the **held-out test set (2022-2024)** utilizing the best-tuned configurations:
+
+| Approach | Best Model | Evaluation Focus | 
+|----------|------------|------------------|
+| **Spatial CV** | Random Forest | Excellent for generalizing cross-space to unseen locations within the park. |
+| **Time-Series CV**| XGBoost | Better at identifying changes strictly based on chronologically prior events. |
+
+*> Evaluating on 7,200 testing samples comparing Time-Series holdouts vs Spatial block holdouts.*
 
 ---
 
@@ -88,7 +160,7 @@ Mean scene count per final alert pixel
 ## Dependencies
 
 - Google Earth Engine account with access to `COPERNICUS/S2_SR_HARMONIZED` and `ESA/WorldCover/v200`
-- Python ≥ 3.9 with `gdal`, `geopandas`, `shapely`
+- Python ≥ 3.9 with `gdal`, `geopandas`, `shapely`, `scikit-learn`, `xgboost`, `pandas`, and `notebook`
 - QGIS (optional) for visual inspection
 
 ---
